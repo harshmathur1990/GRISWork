@@ -39,9 +39,9 @@ def make_plots_for_dkist_proposal():
 
     axs[1][0].imshow(trdata[0, 0, :, :, 129], cmap='gray', origin='lower', extent=extent)
 
-    axs[0][1].plot(wave, trdata[0, 0, 13, 31, :])
+    axs[0][1].plot(wave, trdata[0, 0, points[0][0], points[0][1], :])
 
-    axs[1][1].plot(wave, trdata[0, 3, 13, 31, :] / trdata[0, 0, 13, 31, :])
+    axs[1][1].plot(wave, trdata[0, 3, points[0][0], points[0][1], :] / trdata[0, 0, points[0][0], points[0][1], :])
 
     axs[1][1].set_ylim(-0.13, 0.13)
 
