@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 
 base_path = Path('/mnt/f/GRIS')
-kmeans_output_dir = base_path / 'K-Means'
+kmeans_output_dir = base_path / 'K-Means-PCA'
 input_files = [
     base_path / '25Apr25ARM2-003.fits',
     base_path / '25Apr25ARM2-004.fits'
@@ -34,6 +34,7 @@ class Status(enum.Enum):
 def do_work(num_clusters):
     global shared_array_all_data
     global shared_array_framerows
+    global shared_array_all_data_pca
     global mn
     global sd
     global weights
@@ -46,7 +47,9 @@ def do_work(num_clusters):
             tol=1e-6
         )
 
-        model.fit(shared_array_framerows)
+        model.fit(shared_array_all_data_pca)
+
+        # model.fit(shared_array_framerows)
 
         fout = h5py.File(
             '{}/out_SV_{}.h5'.format(kmeans_output_dir, num_clusters), 'w'
@@ -155,7 +158,7 @@ if __name__ == '__main__':
     size = comm.Get_size()
 
     base_path = Path('/mnt/f/GRIS')
-    kmeans_output_dir = base_path / 'K-Means'
+    kmeans_output_dir = base_path / 'K-Means-PCA'
     input_files = [
         base_path / '25Apr25ARM2-003.fits',
         base_path / '25Apr25ARM2-004.fits'
@@ -183,21 +186,29 @@ if __name__ == '__main__':
     if shm_comm.rank == 0:
         itemsize = MPI.DOUBLE.Get_size()
         nbytes = total_rows * total_cols * itemsize
+        nbytes_pca = total_rows * (total_cols - 1) * itemsize
     else:
         nbytes = 0
+        nbytes_pca = 0
         itemsize = MPI.DOUBLE.Get_size()
 
     win = MPI.Win.Allocate_shared(nbytes, itemsize, comm=shm_comm)
 
     win2 = MPI.Win.Allocate_shared(nbytes, itemsize, comm=shm_comm)
 
+    win3 = MPI.Win.Allocate_shared(nbytes_pca, itemsize, comm=shm_comm)
+
     buf, _ = win.Shared_query(0)
 
-    buf2, _ = win.Shared_query(0)
+    buf2, _ = win2.Shared_query(0)
+
+    buf3, _ = win3.Shared_query(0)
 
     shared_array_framerows = np.ndarray(buffer=buf, dtype='d', shape=(total_rows, total_cols))
 
     shared_array_all_data = np.ndarray(buffer=buf2, dtype='d', shape=(total_rows, total_cols))
+
+    shared_array_all_data_pca = np.ndarray(buffer=buf3, dtype='d', shape=(total_rows, total_cols - 1))
 
     if shm_comm.rank == 0:
 
@@ -234,7 +245,20 @@ if __name__ == '__main__':
 
         shared_array_framerows[:] = framerows
 
+        pca = PCA()
+
+        nCompsStart = 1
+        nCompsEnd = 1000
+
+        pca_data = pca.fit_transform(framerows)[:, nCompsStart:nCompsEnd]
+
+        print ("here")
+
+        shared_array_all_data_pca[:] = pca_data
+
     comm.Barrier()
+
+    print ("crossed Barrier")
 
     if rank == 0:
         status = MPI.Status()
@@ -265,6 +289,10 @@ if __name__ == '__main__':
         for index in finished:
             waiting_queue.discard(index)
 
+        f.close()
+
+        mode = 'r+'
+
         t = tqdm(total=len(waiting_queue))
 
         for worker in range(1, size):
@@ -294,10 +322,12 @@ if __name__ == '__main__':
             running_queue.discard(item)
             if jobstatus == Status.Work_done:
                 finished_queue.add(item)
+                f = h5py.File(filepath, mode)
                 if 'finished' in list(f.keys()):
                     del f['finished']
                 finished.append(item)
                 f['finished'] = finished
+                f.close()
             else:
                 failure_queue.add(item)
 
@@ -311,8 +341,6 @@ if __name__ == '__main__':
                 }
                 comm.send(work_type, dest=sender, tag=1)
                 running_queue.add(new_item)
-
-        f.close()
 
         for worker in range(1, size):
             work_type = {

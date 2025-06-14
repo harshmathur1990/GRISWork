@@ -16,15 +16,15 @@ base_path = Path(
 )
 
 base_path = Path('/mnt/f/GRIS')
-kmeans_output_dir = base_path / 'K-Means'
+kmeans_output_dir = base_path / 'K-Means-PCA'
 input_files = [
     base_path / '25Apr25ARM2-003.fits',
     base_path / '25Apr25ARM2-004.fits'
 ]
 
-kmeans_file = base_path / 'chosen_out_SV_100.h5'
+kmeans_file = base_path / 'chosen_PCA_out_SV_100.h5'
 
-rps_plot_write_dir = base_path / 'RPs_Plots'
+rps_plot_write_dir = base_path / 'PCA_RPs_Plots'
 
 
 def make_rps():
@@ -540,9 +540,5 @@ def make_paper_rps_plots(name='RPs'):
 
 
 if __name__ == '__main__':
-    # make_rps()
-    # make_halpha_rps()
-    # plot_rp_map_fov()
+    make_rps()
     make_rps_plots()
-
-    # make_paper_rps_plots()
