@@ -17,10 +17,11 @@ def prepare_interp(x, y, new_x, new_y):
         interp = RectBivariateSpline(x, y, image)
         return interp(new_x, new_y)
 
-	return reinterp
+    return reinterp
 
 
 def reinterpolate_to_square_pixel_scale(base_path, filename):
+
     data, _ = sunpy.io.read_file(base_path / filename)[0]
 
     if len(data.shape) == 5:
@@ -52,8 +53,10 @@ def reinterpolate_to_square_pixel_scale(base_path, filename):
 
     if len(data.shape) == 5:
         new_reshaped_data = np.transpose(new_data, axes=(0, 1, 3, 4, 2))
+        new_reshaped_data = new_reshaped_data[:, :, ::-1, ::-1]
     else:
         new_reshaped_data = np.transpose(new_data, axes=(0, 2, 3, 1))
+        new_reshaped_data = new_reshaped_data[:, ::-1, ::-1]
 
     sunpy.io.write_file(
         base_path / '{}_squarred_pixels.fits'.format(filename),

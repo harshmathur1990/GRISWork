@@ -18,6 +18,9 @@ from skimage.exposure import adjust_gamma
 import matplotlib.animation as animation
 from scipy.interpolate import CubicSpline
 from skimage.transform import rescale
+from scipy.stats import pearsonr
+import ipywidgets as widgets
+from IPython.display import display, clear_output
 
 
 '''
@@ -81,6 +84,8 @@ def flicker(
 
     final_image_2 = final_image_2 / np.nanmax(np.abs(final_image_2))
 
+    res = pearsonr(np.ndarray.flatten(final_image_1), np.ndarray.flatten(final_image_2))
+
     imagelist = [final_image_1, final_image_2]
 
     rate = rate * 1000
@@ -92,6 +97,10 @@ def flicker(
         origin='lower',
         cmap='gray',
         interpolation='none'
+    )
+
+    plt.title(
+        'Pearson: {}'.format(np.round(res.statistic, 2))
     )
 
     # im.set_clim(0, 1)
@@ -163,140 +172,105 @@ def make_correct_shape(image1, image2, fill_value_1, fill_value_2):
     return final_image_1, final_image_2
 
 
-def align_and_merge_ca_ha_data(
-        datestring, timestring,
+def align_and_merge_ca_he_data(
+        filename1, filename2,
         offset_1_y=0, offset_1_x=0, offset_2_y=0, offset_2_x=0
 ):
-    base_path = Path('/home/harsh/CourseworkRepo/InstrumentalUncorrectedStokes')
+    base_path = Path('/mnt/f/GRIS')
 
-    # base_path = Path('/mnt/f/Harsh/CourseworkRepo/InstrumentalUncorrectedStokes')
+    data1, _ = sunpy.io.read_file(base_path / filename1)[0]
 
-    # base_path = Path('C:\\Work Things\\InstrumentalUncorrectedStokes')
+    data2, _ = sunpy.io.read_file(base_path / filename2)[0]
 
-    level7path = base_path / datestring / 'Level-3-alt'
-    level8path = base_path / datestring / 'Level-4-alt-alt'
-
-    file1 = h5py.File(level7path / 'Halpha_{}_{}_stic_profiles.nc'.format(datestring, timestring), 'r')
-
-    file2 = h5py.File(level7path / 'CaII8662_{}_{}_stic_profiles.nc'.format(datestring, timestring), 'r')
-
-    nx = max(
-        file1['profiles'].shape[1] + offset_1_y,
-        file2['profiles'].shape[1] + offset_2_y
-    )
+    if len(data1.shape) == 5:
+        index_y = 2
+        index_x = 3
+    else:
+        index_y = 1
+        index_x = 2
 
     ny = max(
-        file1['profiles'].shape[2] + offset_1_x,
-        file2['profiles'].shape[2] + offset_2_x
+        data1.shape[index_y] + offset_1_y,
+        data2.shape[index_y] + offset_2_y
     )
 
-    ha = sp.profile(
-        nx=nx, ny=ny, ns=4,
-        nw=file1['wav'].shape[0]
-    )
-    ca = sp.profile(
-        nx=nx, ny=ny, ns=4,
-        nw=file2['wav'].shape[0]
+    nx = max(
+        data1.shape[index_x] + offset_1_x,
+        data2.shape[index_x] + offset_2_x
     )
 
-    ha.wav[:] = file1['wav'][()]
+    if len(data1.shape) == 5:
+        ca_data = np.zeros((data1.shape[0], data1.shape[1], ny, nx, data1.shape[4]), dtype=np.float64)
+        he_data = np.zeros((data2.shape[0], data2.shape[1], ny, nx, data2.shape[4]), dtype=np.float64)
+    else:
+        ca_data = np.zeros((data1.shape[0], ny, nx, data1.shape[3]), dtype=np.float64)
+        he_data = np.zeros((data2.shape[0], ny, nx, data2.shape[3]), dtype=np.float64)
 
-    ha.weights = file1['weights'][()]
+    fill_value_1 = np.median(data1, axis=(index_x, index_y))
 
-    ca.wav[:] = file2['wav'][()]
+    fill_value_2 = np.median(data2, axis=(index_x, index_y))
 
-    ca.weights = file2['weights'][()]
+    if len(data1.shape) == 5:
+        ca_data[:] = fill_value_1[:, :, np.newaxis, np.newaxis]
 
-    d1 = file1['profiles'][0]
+        he_data[:] = fill_value_2[:, :, np.newaxis, np.newaxis]
+    else:
+        ca_data[:] = fill_value_1[:, np.newaxis, np.newaxis]
 
-    d2 = file2['profiles'][0]
+        he_data[:] = fill_value_2[:, np.newaxis, np.newaxis]
 
-    fill_value_1 = np.median(d1, axis=(0, 1))
 
-    fill_value_2 = np.median(d2, axis=(0, 1))
+    if len(data1.shape) == 5:
+        ca_data[:, :, offset_1_y:data1.shape[index_y] + offset_1_y, offset_1_x:data1.shape[index_x] + offset_1_x] = data1
 
-    ha.dat[0] = fill_value_1[np.newaxis, np.newaxis, :, :]
+        he_data[:, :, offset_2_y:data2.shape[index_y] + offset_2_y, offset_2_x:data2.shape[index_x] + offset_2_x] = data2
+    else:
+        ca_data[:, offset_1_y:data1.shape[index_y] + offset_1_y, offset_1_x:data1.shape[index_x] + offset_1_x] = data1
 
-    ca.dat[0] = fill_value_2[np.newaxis, np.newaxis, :, :]
-
-    ha.dat[0, 0 + offset_1_x: d1.shape[1] + offset_1_x, 0 + offset_1_y: d1.shape[0] + offset_1_y] = np.transpose(
-        d1,
-        axes=(1, 0, 2, 3)
+        he_data[:, offset_2_y:data2.shape[index_y] + offset_2_y, offset_2_x:data2.shape[index_x] + offset_2_x] = data2
+   
+    sunpy.io.write_file(
+        base_path / '{}_aligned.fits'.format(filename1),
+        ca_data,
+        dict(),
+        overwrite=True
     )
 
-    ca.dat[0, 0 + offset_2_x: d2.shape[1] + offset_2_x, 0 + offset_2_y: d2.shape[0] + offset_2_y] = np.transpose(
-        d2,
-        axes=(1, 0, 2, 3)
+    sunpy.io.write_file(
+        base_path / '{}_aligned.fits'.format(filename2),
+        he_data,
+        dict(),
+        overwrite=True
     )
 
-    all_profiles = ha + ca
 
-    all_profiles.write(
-        level8path / 'aligned_Ca_Ha_stic_profiles_{}_{}.nc'.format(datestring, timestring)
-    )
-
-    residual_1, header = sunpy.io.read_file(level7path / 'residuals_{}_DETECTOR_1.fits'.format(timestring))[0]
-
-    residual_2_file = level7path / 'residuals_{}_DETECTOR_3.fits'.format(timestring)
-
-    if not residual_2_file.exists():
-        residual_2_file = level7path / 'residuals_{}_DETECTOR_2.fits'.format(timestring)
-
-    residual_2, _ = sunpy.io.read_file(residual_2_file)[0]
-
-    new_residual = np.zeros(
-        (
-            4,
-            ny,
-            nx,
-            residual_1.shape[3] + residual_2.shape[3]
-        ),
-        dtype=np.float64
-    )
-
-    new_residual[:, 0 + offset_1_x: d1.shape[1] + offset_1_x, 0 + offset_1_y: d1.shape[0] + offset_1_y, 0:residual_1.shape[3]] = np.transpose(
-        residual_1,
-        axes=(0, 2, 1, 3)
-    )
-
-    new_residual[:, 0 + offset_2_x: d2.shape[1] + offset_2_x, 0 + offset_2_y: d2.shape[0] + offset_2_y, residual_1.shape[3]: residual_1.shape[3] + residual_2.shape[3]] = np.transpose(
-        residual_2,
-        axes=(0, 2, 1, 3)
-    )
-
-    sunpy.io.write_file(level8path / 'aligned_residual_Ca_Ha_{}_{}.fits'.format(datestring, timestring), new_residual, header, overwrite=True)
-
-
-def run_flicker(datestring, timestring, offset_1_y=0, offset_1_x=0, offset_2_y=0, offset_2_x=0, create_files=False):
-    base_path = Path('/home/harsh/CourseworkRepo/InstrumentalUncorrectedStokes')
-
-    # base_path = Path('/mnt/f/Harsh/CourseworkRepo/InstrumentalUncorrectedStokes')
-
-    # base_path = Path('F:\\Harsh\\CourseworkRepo\\InstrumentalUncorrectedStokes')
-
-    # base_path = Path('C:\\Work Things\\InstrumentalUncorrectedStokes')
-
-    level7path = base_path / datestring / 'Level-3-alt'
-    level8path = base_path / datestring / 'Level-4-alt-alt'
-
-    level8path.mkdir(parents=True, exist_ok=True)
-
-
-    file1 = h5py.File(level7path / 'Halpha_{}_{}_stic_profiles.nc'.format(datestring, timestring), 'r')
-    file2 = h5py.File(level7path / 'CaII8662_{}_{}_stic_profiles.nc'.format(datestring, timestring), 'r')
-
-    fill_value_1 = np.nanmedian(file1['profiles'][0, :, :, 32, 0])
-    fill_value_2 = np.nanmedian(file2['profiles'][0, :, :, 32, 0])
+def run_flicker(filename1, filename2, offset_1_y=0, offset_1_x=0, offset_2_y=0, offset_2_x=0, create_files=False):
+    base_path = Path('/mnt/f/GRIS')
 
     if not create_files:
+
+        data1, _ = sunpy.io.read_file(base_path / filename1)[0]
+
+        data2, _ = sunpy.io.read_file(base_path / filename2)[0]
+
+        if len(data1.shape) == 5:
+            image1 = data1[0, 0, :, :, 999]
+            image2 = data2[0, 0, :, :, 0]
+        else:
+            image1 = data1[0, :, :, 999]
+            image2 = data2[0, :, :, 0]
+
+        fill_value_1 = np.median(image1)
+        fill_value_2 = np.median(image2)
+        
         flicker(
-            file1['profiles'][0, :, :, 32, 0], file2['profiles'][0, :, :, 32, 0], fill_value_1, fill_value_2,
+            image1, image2, fill_value_1, fill_value_2,
             offset_1_y=offset_1_y, offset_1_x=offset_1_x, offset_2_y=offset_2_y, offset_2_x=offset_2_x
         )
 
     else:
         align_and_merge_ca_ha_data(
-            datestring=datestring, timestring=timestring,
+            filename1, filename2,
             offset_1_y=offset_1_y, offset_1_x=offset_1_x, offset_2_y=offset_2_y, offset_2_x=offset_2_x
         )
 
@@ -1042,12 +1016,84 @@ def run_halpha_flicker(
         )
 
 
+def flicker_interactive(filename1, filename2):
+    base_path = Path('/mnt/f/GRIS')
+    data1, _ = sunpy.io.read_file(base_path / filename1)[0]
+    data2, _ = sunpy.io.read_file(base_path / filename2)[0]
+
+    if len(data1.shape) == 5:
+        image1 = data1[0, 0, :, :, 999]
+        image2 = data2[0, 0, :, :, 0]
+    else:
+        image1 = data1[0, :, :, 999]
+        image2 = data2[0, :, :, 0]
+
+    fill_value_1 = np.median(image1)
+    fill_value_2 = np.median(image2)
+
+    image1 = image1.astype(np.float64)
+    image2 = image2.astype(np.float64)
+
+    image1 /= np.nanmax(np.abs(image1))
+    image2 /= np.nanmax(np.abs(image2))
+
+    def update(offset_1_y, offset_1_x, offset_2_y, offset_2_x):
+        final_shape = (
+            max(image1.shape[0] + offset_1_y, image2.shape[0] + offset_2_y),
+            max(image1.shape[1] + offset_1_x, image2.shape[1] + offset_2_x)
+        )
+        final_image_1 = np.ones(final_shape) * fill_value_1
+        final_image_2 = np.ones(final_shape) * fill_value_2
+
+        final_image_1[offset_1_y:image1.shape[0]+offset_1_y,
+                      offset_1_x:image1.shape[1]+offset_1_x] = image1
+        final_image_2[offset_2_y:image2.shape[0]+offset_2_y,
+                      offset_2_x:image2.shape[1]+offset_2_x] = image2
+
+        res = pearsonr(final_image_1.ravel(), final_image_2.ravel()).statistic
+
+        fig, ax = plt.subplots()
+        imagelist = [final_image_1, final_image_2]
+        im = ax.imshow(imagelist[0], origin='lower', cmap='gray')
+        ax.set_title(f'Pearson: {res:.3f}')
+
+        def animate(i):
+            im.set_data(imagelist[i])
+            im.set_clim(np.nanmin(imagelist[i]) * 0.9, np.nanmax(imagelist[i]) * 1.1)
+            return [im]
+
+        ani = animation.FuncAnimation(
+            fig, animate, frames=2, interval=500, blit=True
+        )
+        plt.show()
+
+    offset_1_y_slider = widgets.IntSlider(min=0, max=100, step=1, value=0, description='offset_1_y')
+    offset_1_x_slider = widgets.IntSlider(min=0, max=100, step=1, value=0, description='offset_1_x')
+    offset_2_y_slider = widgets.IntSlider(min=0, max=100, step=1, value=0, description='offset_2_y')
+    offset_2_x_slider = widgets.IntSlider(min=0, max=100, step=1, value=0, description='offset_2_x')
+
+    ui = widgets.VBox([
+        widgets.HBox([offset_1_y_slider, offset_1_x_slider]),
+        widgets.HBox([offset_2_y_slider, offset_2_x_slider])
+    ])
+
+    out = widgets.interactive_output(update, {
+        'offset_1_y': offset_1_y_slider,
+        'offset_1_x': offset_1_x_slider,
+        'offset_2_y': offset_2_y_slider,
+        'offset_2_x': offset_2_x_slider
+    })
+
+    display(ui, out)
+
+
 if __name__ == '__main__':
-    run_flicker(
-        datestring='20230603', timestring='073616',
-        offset_1_y=0, offset_1_x=0, offset_2_y=2, offset_2_x=15,
-        create_files=True
-    )
+    flicker_interactive(filename1='25Apr25ARM2-003.fits_squarred_pixels.fits', filename2='25Apr25ARM1-003.fits_squarred_pixels.fits')
+    # run_flicker(
+    #     filename1='25Apr25ARM2-003.fits_squarred_pixels.fits', filename2='25Apr25ARM1-003.fits_squarred_pixels.fits',
+    #     offset_1_y=0, offset_1_x=0, offset_2_y=0, offset_2_x=0,
+    #     create_files=False
+    # )
     # run_flicker(
     #     datestring='20230603', timestring='092458',
     #     offset_1_y=0, offset_1_x=0, offset_2_y=2, offset_2_x=15,
@@ -1574,15 +1620,15 @@ if __name__ == '__main__':
     #     save=True
     # )
     #
-    get_aia_reference_image(
-        datestring='20230527', timestring='074428',
-        aia_file='hmi.M_720s.20230527_024800_TAI.3.magnetogram.fits',
-        angle=-19,
-        offset_x=94, offset_y=62,
-        init_x=-20,
-        init_y=-260,
-        save=True
-    )
+    # get_aia_reference_image(
+    #     datestring='20230527', timestring='074428',
+    #     aia_file='hmi.M_720s.20230527_024800_TAI.3.magnetogram.fits',
+    #     angle=-19,
+    #     offset_x=94, offset_y=62,
+    #     init_x=-20,
+    #     init_y=-260,
+    #     save=True
+    # )
 
     # calibrate_hmi_with_hmi(
     #     datestring='20230527', timestring='074428',
