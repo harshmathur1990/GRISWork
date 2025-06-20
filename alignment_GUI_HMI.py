@@ -16,14 +16,13 @@ import scipy
 from scipy.interpolate import RectBivariateSpline
 from tqdm import tqdm
 from scipy.ndimage import zoom
+from datetime import datetime
 
 
 plt.switch_backend('QtAgg')
 
 
 def get_upsampled_image(image, factor):
-    if factor == 1:
-        return image
     return zoom(image, factor, order=1)
 
 
@@ -140,8 +139,6 @@ def get_correlation_value(
 
 
 def average_downsample(image, factor):
-    if factor == 1:
-        return image
     h, w = image.shape
     return image[:h//factor*factor, :w//factor*factor].reshape(
         h//factor, factor, w//factor, factor).mean(axis=(1, 3))
@@ -565,11 +562,21 @@ def animate(base_path, filename1, filename2, subpixel_accuracy):
 
 if __name__ == '__main__':
 
+
+
+exact_date = '2025-04-25T09:08:00+0000'
+
     base_path = Path('/mnt/f/GRIS')
 
-    filename1 = '25Apr25ARM1-003.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
+    filename1 = '25Apr25ARM1-003.fits_squarred_pixels.fits'
 
-    filename2 = '25Apr25ARM2-003.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
+    hmi_path = base_path / 'SDO'
+
+    exact_date = '2025-04-25T09:08:00+0000'
+
+    parsed_date = datetime.strptime(exact_date, '%Y-%m-%dT%H:%M:%S%z')
+
+    # filename2 = '25Apr25ARM2-003.fits_squarred_pixels.fits'
 
     # filename1 = '25Apr25ARM1-003.fits_squarred_pixels.fits_aligned.fits'
 
@@ -579,6 +586,6 @@ if __name__ == '__main__':
 
     # filename2 = '25Apr25ARM2-004.fits_squarred_pixels.fits'
 
-    subpixel_accuracy = 1
+    subpixel_accuracy = 20
 
-    animate(base_path, filename1, filename2, subpixel_accuracy)
+    animate(base_path, filename1, hmi_path, exact_date, cadence=44, subpixel_target=0.005)
