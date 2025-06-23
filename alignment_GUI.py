@@ -24,7 +24,40 @@ plt.switch_backend('QtAgg')
 def get_upsampled_image(image, factor):
     if factor == 1:
         return image
-    return zoom(image, factor, order=1)
+    """
+    Zooms a 2D image using spline interpolation.
+
+    Parameters:
+    -----------
+    image : 2D numpy array
+        Input image to be zoomed.
+    factor : float
+        Zoom factor (>1 for upsampling, <1 for downsampling).
+
+    Returns:
+    --------
+    zoomed_image : 2D numpy array
+        Resampled image with new shape.
+    """
+    ny, nx = image.shape
+
+    # Original grid
+    y = np.arange(ny)
+    x = np.arange(nx)
+
+    # Spline interpolator
+    spline = RectBivariateSpline(y, x, image, kx=1, ky=1)
+
+    # New grid
+    new_ny = int(np.round(ny * factor))
+    new_nx = int(np.round(nx * factor))
+    y_new = np.linspace(0, ny - 1, new_ny)
+    x_new = np.linspace(0, nx - 1, new_nx)
+
+    # Evaluate the spline on new grid
+    zoomed_image = spline(y_new, x_new)
+
+    return zoomed_image
 
 
 def get_orig_images(data1, data2, time, wave1, wave2, subpixel_accuracy=1):
@@ -567,17 +600,9 @@ if __name__ == '__main__':
 
     base_path = Path('/mnt/f/GRIS')
 
-    filename1 = '25Apr25ARM1-003.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
+    filename1 = '25Apr25ARM1-004.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
 
-    filename2 = '25Apr25ARM2-003.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
-
-    # filename1 = '25Apr25ARM1-003.fits_squarred_pixels.fits_aligned.fits'
-
-    # filename2 = '25Apr25ARM2-003.fits_squarred_pixels.fits_aligned.fits'
-
-    # filename1 = '25Apr25ARM1-004.fits_squarred_pixels.fits'
-
-    # filename2 = '25Apr25ARM2-004.fits_squarred_pixels.fits'
+    filename2 = '25Apr25ARM2-004.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
 
     subpixel_accuracy = 1
 
