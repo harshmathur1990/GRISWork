@@ -600,10 +600,10 @@ if __name__ == '__main__':
 
     base_path = Path('/mnt/f/GRIS')
 
-    filename1 = '25Apr25ARM1-004.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
+    filename1 = '25Apr25ARM1-003.fits_squarred_pixels.fits'
 
-    filename2 = '25Apr25ARM2-004.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
+    filename2 = '25Apr25ARM2-003.fits_squarred_pixels.fits'
 
-    subpixel_accuracy = 1
+    subpixel_accuracy = 20
 
     animate(base_path, filename1, filename2, subpixel_accuracy)
