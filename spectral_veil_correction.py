@@ -75,8 +75,6 @@ def calculate_spectral_veil_from_median_profile(
 
     broadening_km_sec = np.abs(r_fwhm * (wave[1] - wave[0]) * 2.99792458e5 / wavelength)
 
-    veil_corrected_median = median_profile
-
     veil_corrected_median = correct_for_spectral_veil(
         median_profile,
         r_spectral_veil,
