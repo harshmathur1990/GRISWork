@@ -88,98 +88,20 @@ def average_downsample(image, factor):
         h//factor, factor, w//factor, factor).mean(axis=(1, 3))
 
 
-def align_and_merge_ca_he_data_streaming(
-        base_path, filename1, filename2, subpixel_accuracy=1,
-        offset_1_y=0, offset_1_x=0, offset_2_y=0, offset_2_x=0
-):
-    data1, _ = sunpy.io.read_file(base_path / filename1)[0]
-    data2, _ = sunpy.io.read_file(base_path / filename2)[0]
+def downsample_sunpy_map(map_in, factor):
+    
+    new_data = average_downsample(map_in.data, factor)
 
-    print("Read data...")
+    # Copy and modify the metadata
+    new_meta = MetaDict(map_in.meta.copy())
+    new_meta['NAXIS1'] = new_data.shape[1]
+    new_meta['NAXIS2'] = new_data.shape[0]
+    new_meta['CDELT1'] *= factor
+    new_meta['CDELT2'] *= factor
+    new_meta['CRPIX1'] /= factor
+    new_meta['CRPIX2'] /= factor
 
-    is_5d = (len(data1.shape) == 5)
-    if is_5d:
-        T1, P1, H1, W1, C1 = data1.shape
-        T2, P2, H2, W2, C2 = data2.shape
-    else:
-        T1, H1, W1, C1 = data1.shape
-        T2, H2, W2, C2 = data2.shape
-        P1 = P2 = 1  # Dummy polarization axis
-
-    # Consistency check for T and P
-    assert T1 == T2 and P1 == P2, "Mismatch in time or polarization dimensions"
-
-    # Final canvas size (upsampled)
-    up_H1 = H1 * subpixel_accuracy
-    up_W1 = W1 * subpixel_accuracy
-    up_H2 = H2 * subpixel_accuracy
-    up_W2 = W2 * subpixel_accuracy
-
-    canvas_H = max(offset_1_y + up_H1, offset_2_y + up_H2)
-    canvas_W = max(offset_1_x + up_W1, offset_2_x + up_W2)
-
-    final_H = canvas_H // subpixel_accuracy
-    final_W = canvas_W // subpixel_accuracy
-
-    print(f"Output shape after alignment and downsampling: ({final_H}, {final_W})")
-
-    # Preallocate
-    if is_5d:
-        aligned_1 = np.zeros((T1, P1, final_H, final_W, C1), dtype=np.float32)
-        aligned_2 = np.zeros((T2, P2, final_H, final_W, C2), dtype=np.float32)
-    else:
-        aligned_1 = np.zeros((T1, final_H, final_W, C1), dtype=np.float32)
-        aligned_2 = np.zeros((T2, final_H, final_W, C2), dtype=np.float32)
-
-    canvas1 = np.empty((canvas_H, canvas_W), dtype=np.float32)
-    canvas2 = np.empty((canvas_H, canvas_W), dtype=np.float32)
-
-    total_steps = T1 * P1 * (C1 + C2)
-    with tqdm(total=total_steps, desc="Aligning frames") as pbar:
-        for t in range(T1):
-            for p in range(P1):
-                for c in range(C1):
-                    img1 = data1[t, p, :, :, c] if is_5d else data1[t, :, :, c]
-                    img1_up = get_upsampled_image(img1, subpixel_accuracy)
-                    canvas1.fill(np.median(img1_up))
-                    canvas1[offset_1_y:offset_1_y + img1_up.shape[0],
-                            offset_1_x:offset_1_x + img1_up.shape[1]] = img1_up
-                    img1_down = average_downsample(canvas1, subpixel_accuracy)
-                    if is_5d:
-                        aligned_1[t, p, :, :, c] = img1_down
-                    else:
-                        aligned_1[t, :, :, c] = img1_down
-                    pbar.update(1)
-
-                for c in range(C2):
-                    img2 = data2[t, p, :, :, c] if is_5d else data2[t, :, :, c]
-                    img2_up = get_upsampled_image(img2, subpixel_accuracy)
-                    canvas2.fill(np.median(img2_up))
-                    canvas2[offset_2_y:offset_2_y + img2_up.shape[0],
-                            offset_2_x:offset_2_x + img2_up.shape[1]] = img2_up
-                    img2_down = average_downsample(canvas2, subpixel_accuracy)
-                    if is_5d:
-                        aligned_2[t, p, :, :, c] = img2_down
-                    else:
-                        aligned_2[t, :, :, c] = img2_down
-                    pbar.update(1)
-
-    print("Saving aligned, downsampled data...")
-
-    sunpy.io.write_file(
-        base_path / f'{filename1}_aligned_downsampled_streamed.fits',
-        aligned_1,
-        dict(),
-        overwrite=True
-    )
-    sunpy.io.write_file(
-        base_path / f'{filename2}_aligned_downsampled_streamed.fits',
-        aligned_2,
-        dict(),
-        overwrite=True
-    )
-
-    print("Done and saved.")
+    return sunpy.map.Map(new_data, new_meta)
 
 
 def get_closest(exact_date, cadence, time, fits_datetimes):
@@ -252,7 +174,7 @@ def get_hmi_submap(
 
 
 def animate(
-    base_path, filename, hmi_path,
+    base_path, filename, hmi_path, hmi_write_path,
     exact_date, cadence=44, subpixel_target=0.005
 ):
 
@@ -290,10 +212,15 @@ def animate(
         if time in val_dict:
             return val_dict[time]['init_x'],  val_dict[time]['init_y'], val_dict[time]['wave']
         else:
-            return 0, 0, 0
+            max_time = max(val_dict)
+            init_x = val_dict[max_time]['init_x']
+            init_y = val_dict[max_time]['init_y']
+            wave = val_dict[max_time]['wave']
+            set_val(time, init_x, init_y, wave)
+            return init_x, init_y, wave
 
     def set_val(time, init_x, init_y, wave):
-        print ("setting for time: {}".format(time))
+
         if time in val_dict:
             val_dict[time]['init_x'] = init_x
             val_dict[time]['init_y'] = init_y
@@ -303,8 +230,6 @@ def animate(
             val_dict[time]['init_x'] = init_x
             val_dict[time]['init_y'] = init_y
             val_dict[time]['wave'] = wave
-
-        print (val_dict)
 
     hmi_file_list = list(hmi_path.glob("*.fits"))
 
@@ -448,7 +373,7 @@ def animate(
 
     save_button = Button(button_ax, 'Save Data')
 
-    def prepare_flicker_callback(frame_toggle, im, fig, image1, image2, text_image):
+    def prepare_flicker_callback(frame_toggle, im, axs, fig, image1, image2, text_image):
         def flicker_callback(*args):
 
             if frame_toggle[0] == 0:
@@ -461,11 +386,14 @@ def animate(
             im.set_array(frame)
             mn, mx = np.nanmin(frame) * 0.9, np.nanmax(frame) * 1.1
             im.set_clim(mn, mx)
-            fig.canvas.draw_idle()
+            axs.draw_artist(axs.patch)
+            axs.draw_artist(im)
+            axs.draw_artist(text_image)
+            fig.canvas.blit(axs.bbox)
             frame_toggle[0] = 1 - frame_toggle[0]
         return flicker_callback
 
-    flicker_callback = prepare_flicker_callback(frame_toggle, im, fig, final_image_1[0], final_image_2[0], text_image)
+    flicker_callback = prepare_flicker_callback(frame_toggle, im, axs[1], fig, final_image_1[0], final_image_2[0], text_image)
 
     timer = fig.canvas.new_timer(interval=500)
     timer.add_callback(flicker_callback)
@@ -474,6 +402,12 @@ def animate(
     def update_timer():
 
         u_init_x, u_init_y, u_wave = get_val(time[0])
+
+        print ('{} | {} | {} | {}'.format(time[0], u_init_x, u_init_y, u_wave))
+
+        init_x_textbox.set_val(str(u_init_x))
+
+        init_y_textbox.set_val(str(u_init_y))
 
         closest_datetime, closest_file = get_closest(exact_date, cadence, time[0], fits_datetimes)
 
@@ -485,7 +419,7 @@ def animate(
 
         resampled_submap = get_hmi_submap(
             aia_map, image, u_init_x, u_init_y
-        )    
+        )
 
         final_image_1 = [upsampled_image]
 
@@ -496,23 +430,75 @@ def animate(
         )
 
         flicker_callback = prepare_flicker_callback(
-            frame_toggle, im, fig,
+            frame_toggle, im, axs[1], fig,
             final_image_1[0], final_image_2[0], text_image
         )
+
+
+        t_text.set_text('t={}'.format(time[0]))
+        w_text.set_text('w={}'.format(wave[0]))
+        corr_text.set_text('Pearson Corr: {}'.format(corr))
+        f2_text.set_text(
+            'F2: {}'.format(closest_file.name)
+        )
+
+        im0.set_array(aia_map.data)
+        mn, mx = np.nanmin(aia_map.data) * 0.9, np.nanmax(aia_map.data) * 1.1
+        im0.set_clim(mn, mx)
+        axs[0].draw_artist(axs[0].patch)
+        axs[0].draw_artist(im0)
+        axs[0].draw_artist(t_text)
+        axs[0].draw_artist(w_text)
+        axs[0].draw_artist(corr_text)
+        axs[0].draw_artist(f2_text)
+        fig.canvas.blit(axs[0].bbox)
+
         timer.stop()
         timer.callbacks = []
         timer.add_callback(flicker_callback)
         timer.start()
-        t_text.set_text('t={}'.format(time[0]))
-        w_text.set_text('w={}'.format(wave[0]))
-        corr_text.set_text('Pearson Corr: {}'.format(corr))
 
     def do_save(event):
-        # align_and_merge_ca_he_data_streaming(
-        #     base_path, filename1, filename2, subpixel_accuracy,
-        #     offset_1_y[0], offset_1_x[0], offset_2_y[0], offset_2_x[0]
-        # )
-        pass
+        list_t = list(range(0, t_max, 1))
+
+        not_done_t = list()
+
+        for a_t in list_t:
+            if a_t not in val_dict:
+                not_done_t_max.append(a_t)
+
+        if len(not_done_t) > 0:
+            print (
+                "Please align for the remaining times : {}".format(
+                    ', '.join([str(x) for x in not_done_t])
+                )
+            )
+        else:
+
+            with tqdm(total=t_max, desc="Saving data") as pbar:
+                for a_t in list_t:
+                    u_init_x, u_init_y, u_wave = get_val(a_t)
+
+                    closest_datetime, closest_file = get_closest(exact_date, cadence, a_t, fits_datetimes)
+
+                    aia_map = get_aia_map(closest_file)
+
+                    image = get_orig_image(data, a_t, u_wave)
+
+                    resampled_submap = get_hmi_submap(
+                        aia_map, image, u_init_x, u_init_y
+                    )
+
+                    downsampled_map = downsample_sunpy_map(resampled_submap, 27)
+
+                    sunpy.io.write_file(
+                        hmi_write_path / closest_file.name,
+                        downsampled_map.data,
+                        downsampled_map.meta,
+                        overwrite=True
+                    )
+
+                    pbar.update(1)
     
     def update_wave(val):
         wave[0] = val
@@ -528,39 +514,15 @@ def animate(
         time[0] = val
         update_timer()
 
-    # def update_init_x(val):
-    #     init_x[0] = np.round(float(val), 2)
-    #     set_val(
-    #         time[0],
-    #         init_x[0],
-    #         init_y[0],
-    #         wave[0]
-    #     )
-    #     update_timer()
-
-    # def update_init_y(val):
-    #     init_y[0] = np.round(float(val), 2)
-    #     set_val(
-    #         time[0],
-    #         init_x[0],
-    #         init_y[0],
-    #         wave[0]
-    #     )
-    #     update_timer()
-
     def on_click_im0(event):
         if event.inaxes != axs[0]:
             return
 
-        x, y = event.xdata, event.ydata
+        x, y = float(event.xdata), float(event.ydata)
 
         x, y = np.round(x, 2), np.round(y, 2)
         init_x[0] = x
         init_y[0] = y
-
-        init_x_textbox.set_val(str(x))
-
-        init_y_textbox.set_val(str(y))
 
         set_val(
             time[0],
@@ -570,7 +532,6 @@ def animate(
         )
 
         update_timer()
-
 
     def handle_enter(event):
         if event.key == "enter":
@@ -589,14 +550,13 @@ def animate(
     wave_slider.on_changed(update_wave)
     time_slider.on_changed(update_time)
     save_button.on_clicked(do_save)
-    # init_x_textbox.on_submit(update_init_x)
-    # init_y_textbox.on_submit(update_init_y)
     fig.canvas.mpl_connect('button_press_event', on_click_im0)
     fig.canvas.mpl_connect("key_press_event", handle_enter)
 
     plt.subplots_adjust(left=0.05, right=0.99, bottom=0.4, top=0.99, wspace=0.0, hspace=0.2)
 
-    plt.show()
+    # plt.ion()          # turn on interactive mode
+    plt.show()  # non-blocking show
 
 
 if __name__ == '__main__':
@@ -609,8 +569,10 @@ if __name__ == '__main__':
 
     hmi_path = base_path / 'SDO' / 'HMI' / 'Continuum'
 
+    hmi_write_path = base_path / 'aligned_SDO' / 'HMI' / 'Continuum'
+
     exact_date = '2025-04-25T09:08:00+0000'
 
     exact_date = datetime.strptime(exact_date, '%Y-%m-%dT%H:%M:%S%z')
 
-    animate(base_path, filename, hmi_path, exact_date, cadence=44, subpixel_target=0.005)
+    animate(base_path, filename, hmi_path, hmi_write_path, exact_date, cadence=44, subpixel_target=0.005)
