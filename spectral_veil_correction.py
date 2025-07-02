@@ -8,9 +8,17 @@ from copy import deepcopy
 from spectral_veil_library import normalise_profiles, approximate_spectral_veil_and_sigma, correct_for_spectral_veil
 
 
+def read_synthesis_file(falc_output_file):
+    fal = h5py.File(falc_output_file, 'r')
+    falc_profiles = fal['profiles'][0, 0, 0, :, 0]
+    falc_wave = fal['wav'][()]
+    fal.close()
+    return falc_profiles, falc_wave
+
+
 def calculate_spectral_veil_from_median_profile(
     fits_file,
-    falc_output,
+    falc_output_file,
     write_path,
     cont_wave_index,
     wave,
@@ -25,6 +33,8 @@ def calculate_spectral_veil_from_median_profile(
         image = data[0, :, :, cont_wave_index]
 
     plt.imshow(image, origin='lower', cmap='gray')
+    plt.title('Select two points (left-bottom and right-top), \n to select a rectangular region to create median profile')
+
     points = np.array(plt.ginput(2, 600))
 
     x1, y1 = points[0]
@@ -39,13 +49,13 @@ def calculate_spectral_veil_from_median_profile(
     else:
         median_profile = np.median(data[0, y_min:y_max+1, x_min:x_max+1], axis=(0, 1))
 
-    fal = h5py.File(falc_output, 'r')
+    falc_profiles, falc_wave = read_synthesis_file(falc_output_file)
 
     norm_line, norm_atlas, atlas_wave = normalise_profiles(
         median_profile,
         wave,
-        fal['profiles'][0, 0, 0, :, 0],
-        fal['wav'][()],
+        falc_profiles,
+        falc_wave,
         cont_wave=wave[cont_wave_index]
     )
 
@@ -73,9 +83,9 @@ def calculate_spectral_veil_from_median_profile(
         cont_wave_index
     )
 
-    ind_synth = np.argmin(np.abs(fal['wav'][()] - wave[cont_wave_index]))
+    ind_synth = np.argmin(np.abs(falc_wave - wave[cont_wave_index]))
 
-    cgs_calib_factor = veil_corrected_median[cont_wave_index] / fal['profiles'][0, 0, 0, ind_synth, 0]
+    cgs_calib_factor = veil_corrected_median[cont_wave_index] / falc_profiles[ind_synth]
 
     f = h5py.File(
         write_path / 'spectral_veil_estimated_profile_{}.h5'.format(fits_file.name), 'w')
@@ -113,8 +123,8 @@ def calculate_spectral_veil_from_median_profile(
     norm_median_veil, norm_atlas, atlas_wave = normalise_profiles(
         veil_corrected_median,
         wave,
-        fal['profiles'][0, 0, 0, :, 0],
-        fal['wav'][()],
+        falc_profiles,
+        falc_wave,
         cont_wave=wave[cont_wave_index]
     )
 
@@ -140,7 +150,7 @@ def do_spectral_veil_correction_main_func():
         '/mnt/f/GRIS'
     )
 
-    falc_output = base_path / 'FALC_GRIS_IFU_0p79.nc'
+    falc_output_file = base_path / 'FALC_GRIS_IFU_0p79.nc'
 
     fits_data = [
         (
@@ -184,7 +194,7 @@ def do_spectral_veil_correction_main_func():
 
         a, b, c, d, e, f, g, h = calculate_spectral_veil_from_median_profile(
             fits_file=fits_files[0],
-            falc_output=falc_output,
+            falc_output_file=falc_output_file,
             write_path=base_path,
             cont_wave_index=cont_wave_index,
             wave=wave,
@@ -193,8 +203,14 @@ def do_spectral_veil_correction_main_func():
 
         r_fwhm, r_sigma, r_spectral_veil, wave, wavelength, broadening_km_sec, norm_median_veil, cgs_calib_factor = a, b, c, d, e, f, g, h
 
+        print (
+            '{} | Spectral veil: {} | Broadening: {} km/sec'.format(
+                atom, r_spectral_veil, broadening_km_sec
+            )
+        )
+
         for fits_file in fits_files:
-            print (fits_file.name)
+
             data, header = sunpy.io.read_file(fits_file)[0]
 
             if len(data.shape) == 5:
