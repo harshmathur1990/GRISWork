@@ -19,8 +19,8 @@ from tqdm import tqdm
 base_path = Path('/mnt/f/GRIS')
 kmeans_output_dir = base_path / 'K-Means-PCA'
 input_files = [
-    base_path / '25Apr25ARM2-003.fits',
-    base_path / '25Apr25ARM2-004.fits'
+    base_path / 'spectralveil_corrected_25Apr25ARM2-003.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits',
+    base_path / 'spectralveil_corrected_25Apr25ARM2-004.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
 ]
 
 
@@ -145,11 +145,11 @@ def plot_inertia():
     plt.cla()
 
 
-if __name__ == '__main__':
-    plot_inertia()
+# if __name__ == '__main__':
+#     plot_inertia()
 
 
-'''
+
 if __name__ == '__main__':
 
     comm = MPI.COMM_WORLD
@@ -160,8 +160,8 @@ if __name__ == '__main__':
     base_path = Path('/mnt/f/GRIS')
     kmeans_output_dir = base_path / 'K-Means-PCA'
     input_files = [
-        base_path / '25Apr25ARM2-003.fits',
-        base_path / '25Apr25ARM2-004.fits'
+        base_path / 'spectralveil_corrected_25Apr25ARM2-003.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits',
+        base_path / 'spectralveil_corrected_25Apr25ARM2-004.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
     ]
 
     total_rows = 0
@@ -227,11 +227,15 @@ if __name__ == '__main__':
                 data = data.reshape((data.shape[0] * data.shape[1], data.shape[2], data.shape[3]))
 
             if framerows is None:
+                # framerows = data[:, 3] / data[:, 0]
+
                 framerows = data[:, 3] / data[:, 0]
 
             else:
 
-                framerows = np.concatenate([framerows, data[:, 3] / data[:, 0]])
+                # framerows = np.concatenate([framerows, data[:, 3] / data[:, 0]])
+
+                framerows = np.concatenate([framerows, data[:, 0]])
 
         shared_array_all_data[:] = framerows
 
@@ -361,4 +365,4 @@ if __name__ == '__main__':
             status = do_work(item)
 
             comm.send({'status': status, 'item': item}, dest=0, tag=2)
-'''
+
