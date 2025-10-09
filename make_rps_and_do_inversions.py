@@ -1,5 +1,5 @@
 import sys
-sys.path.insert(1, '/mnt/d/Workrepo/stic/example/')
+sys.path.insert(1, '/mn/stornext/u3/harshm/Documents/WorkRepo/stic/example')
 import numpy as np
 import h5py
 import sunpy.io
@@ -12,11 +12,8 @@ import scipy.ndimage
 from tqdm import tqdm
 
 
-base_path = Path(
-    '/mnt/f/GRIS/'
-)
+base_path = Path('/mn/stornext/u3/harshm/Documents/Data/GRIS')
 
-base_path = Path('/mnt/f/GRIS')
 kmeans_output_dir = base_path / 'K-Means-PCA'
 input_files = [
     base_path / 'spectralveil_corrected_25Apr25ARM2-003.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits',
@@ -908,9 +905,9 @@ def make_rps_inversion_plots(rps=None, indexes=None):
     else:
         rps = np.array(rps)
 
-    common_rp_inversion_base = Path('/mnt/f/GRIS/KMeans-Inversions')
+    common_rp_inversion_base = Path('/mn/stornext/u3/harshm/Documents/Data/GRIS/KMeans-Inversions')
 
-    inversion_path = Path('/mnt/d/Workrepo/stic/run')
+    inversion_path = Path('/mn/stornext/u3/harshm/Documents/WorkRepo/stic/run')
 
     # input_profile = common_rp_inversion_base / 'ca_si_rps_stic_profiles_x_100_y_1.nc'
 
@@ -924,11 +921,11 @@ def make_rps_inversion_plots(rps=None, indexes=None):
 
     # output_atmos = common_rp_inversion_base / 'Plots' / 'Plots_41' / 'ca_si_rps_stic_profiles_x_41_y_1_t_7_vlos_7_vturb_4_output_atmos.nc'
 
-    input_profile = inversion_path / 'ca_si_rps_stic_profiles_x_80_y_1.nc'
+    input_profile = inversion_path / 'ca_si_rps_stic_profiles_x_98_y_1.nc'
 
-    output_profile = inversion_path / 'ca_si_rps_stic_profiles_x_80_y_1_t_7_vlos_7_vturb_4_output_profs.nc'
+    output_profile = inversion_path / 'ca_si_rps_stic_profiles_x_98_y_1_t_7_vlos_7_vturb_4_output_profs.nc'
 
-    output_atmos = inversion_path / 'ca_si_rps_stic_profiles_x_80_y_1_t_7_vlos_7_vturb_4_output_atmos.nc'
+    output_atmos = inversion_path / 'ca_si_rps_stic_profiles_x_98_y_1_t_7_vlos_7_vturb_4_output_atmos.nc'
 
     print (rps)
 
@@ -954,7 +951,7 @@ def make_rps_inversion_plots(rps=None, indexes=None):
 
     ind_10827 = nzind[nzind_10827]
 
-    base_write_bath = Path('/mnt/f/GRIS/KMeans-Inversions/Plots')
+    base_write_bath = Path('/mn/stornext/u3/harshm/Documents/Data/GRIS/KMeans-Inversions/Plots')
     
     t = tqdm(total=rps.shape[0], desc="Generating plots", unit="RP")
 
@@ -1111,7 +1108,7 @@ if __name__ == '__main__':
     # make_rps_plots()
     # make_si_rps()
     # make_rps_plots(name='RPs_SI', cw=10827)
-    # make_stic_inversion_files_si_ca_rps(rps=[80])
+    # make_stic_inversion_files_si_ca_rps(rps=[98])
     # generate_input_atmos_file_from_falc(
     #     length=1,
     #     temp=[[-8, -5.5, -5, -4.5, -4, -3.5, -2, -1, 0, 2], [7000, 6500, 5500, 4500, 5500, 4500, 5000, 5500, 6500, 7000]],
@@ -1119,15 +1116,15 @@ if __name__ == '__main__':
     #     )
     # generate_input_atmos_file_from_falc(length=1, in_file='/mnt/d/GRIS/KMeans-Inversions/ca_rps_stic_profiles_x_5_11_16_y_1.nc_level_5_alt_alt_cycle_1_t_7_vl_7_vt_4_falc_atmos.nc')
     # make_rps_inversion_plots()
-    make_rps_inversion_plots(rps=[80])
-    # file='/mnt/f/GRIS/KMeans-Inversions/ca_rps_stic_profiles_x_5_11_16_y_1.nc_level_5_alt_alt_cycle_1_t_7_vl_7_vt_4_falc_atmos.nc'
-    # file='/mnt/f/GRIS/KMeans-Inversions/ca_si_rps_stic_profiles_x_100_y_1_t_6_vlos_5_vturb_3_output_atmos.nc'
-    # file='/mnt/f/GRIS/KMeans-Inversions/Plots/Plots_54/ca_si_rps_stic_profiles_x_54_y_1_t_7_vlos_7_vturb_4_output_atmos.nc'
+    make_rps_inversion_plots(rps=[98])  #, indexes=[91])
+    # file='/mn/stornext/u3/harshm/Documents/Data/GRIS/KMeans-Inversions/ca_rps_stic_profiles_x_5_11_16_y_1.nc_level_5_alt_alt_cycle_1_t_7_vl_7_vt_4_falc_atmos.nc'
+    # file='/mn/stornext/u3/harshm/Documents/Data/GRIS/KMeans-Inversions/ca_si_rps_stic_profiles_x_100_y_1_t_6_vlos_5_vturb_3_output_atmos.nc'
+    # file='/mn/stornext/u3/harshm/Documents/Data/GRIS/KMeans-Inversions/Plots/Plots_54/ca_si_rps_stic_profiles_x_54_y_1_t_7_vlos_7_vturb_4_output_atmos.nc'
     # generate_input_atmos_file(
     #     length=1,
     #     temp=None,
     #     vlos=None,
-    #     name='emission_54',
+    #     name='emission',
     #     file=file,
     #     index=0,
     #     vlos_multiplier=1,
