@@ -1297,11 +1297,12 @@ def make_observation_object_caller(
     return obs
 
 
-def generate_input_atmos(
+def generate_guess_atmos(
     rps_atmos_filepath,
     pixel_indices,
     rps,
-    rps_name
+    rps_name,
+    write_path
 ):
 
     temp, vlos, vturb = get_rp_atmos(
@@ -1338,7 +1339,8 @@ def write_profiles(
     actual_filepath_ca,
     actual_filepath_si,
     rps,
-    rps_name
+    rps_name,
+    write_path
 ):
     si_core_indice = [400, 656]
 
@@ -1429,14 +1431,16 @@ def generate_actual_inversion_files_kmeans(
         actual_filepath_ca=actual_filepath_ca,
         actual_filepath_si=actual_filepath_si,
         rps=rps,
-        rps_name=rps_name
+        rps_name=rps_name,
+        write_path=write_path
     )
     
-    generate_input_atmos(
+    generate_guess_atmos(
         rps_atmos_filepath=rps_atmos_filepath,
         pixel_indices=pixel_indices,
         rps=rps,
-        rps_name=rps_name
+        rps_name=rps_name,
+        write_path=write_path
     )
 
 
