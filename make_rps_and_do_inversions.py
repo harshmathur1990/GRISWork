@@ -2,6 +2,7 @@ import sys
 sys.path.insert(1, '/mn/stornext/u3/harshm/Documents/WorkRepo/stic/example')
 import numpy as np
 import h5py
+import netCDF4 as nc
 import sunpy.io
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -615,6 +616,7 @@ def make_observation_object(
     all_weight=0.004,
     core_weight=0.001,
     ignore_indice=None,
+    create_sigma_files=False
 ):
     wc, ic = findgrid(wave, (wave[1] - wave[0]) / factor, extra=8)
 
@@ -630,35 +632,38 @@ def make_observation_object(
     obs.weights[:, :] = 1.e16  # Very high value means weight zero
     obs.weights[ic, 0] = all_weight
     obs.weights[ic[core_indice[0]:core_indice[1]], 0] = core_weight
-    
+
     if ignore_indice is not None:
         obs.weights[ic[ignore_indice[0]:ignore_indice[1]], 0] = 1e16
-    
-    if wave.size%2 == 0:
-        kernel_size = wave.size - 1
-    else:
-        kernel_size = wave.size - 2
 
-    rev_kernel = np.zeros(kernel_size)
-    rev_kernel[kernel_size//2] = 1
-    kernel = scipy.ndimage.gaussian_filter1d(rev_kernel, sigma=r_sigma * factor)
+    formatted_string = ''
 
-    broadening_filename = 'gaussian_broadening_{}_pixel_{}.h5'.format(r_sigma * factor, wave_name)
+    if create_sigma_files:
+        if wave.size%2 == 0:
+            kernel_size = wave.size - 1
+        else:
+            kernel_size = wave.size - 2
 
-    f = h5py.File(write_path / broadening_filename, 'w')
-    f['iprof'] = kernel
-    f['wav'] = np.zeros_like(kernel)
-    f.close()
+        rev_kernel = np.zeros(kernel_size)
+        rev_kernel[kernel_size//2] = 1
+        kernel = scipy.ndimage.gaussian_filter1d(rev_kernel, sigma=r_sigma * factor)
 
-    lab = "region = {0:10.5f}, {1:8.5f}, {2:3d}, {3:e}, {4}"
+        broadening_filename = 'gaussian_broadening_{}_pixel_{}.h5'.format(r_sigma * factor, wave_name)
 
-    formatted_string = lab.format(
-        obs.wav[0],
-        obs.wav[1] - obs.wav[0],
-        obs.wav.shape[0],
-        cont,
-        'spectral, {}'.format(broadening_filename)
-    )
+        f = h5py.File(write_path / broadening_filename, 'w')
+        f['iprof'] = kernel
+        f['wav'] = np.zeros_like(kernel)
+        f.close()
+
+        lab = "region = {0:10.5f}, {1:8.5f}, {2:3d}, {3:e}, {4}"
+
+        formatted_string = lab.format(
+            obs.wav[0],
+            obs.wav[1] - obs.wav[0],
+            obs.wav.shape[0],
+            cont,
+            'spectral, {}'.format(broadening_filename)
+        )
 
     return formatted_string, obs
 
@@ -698,7 +703,7 @@ def make_stic_inversion_files_si_ca_rps(rps=None, get_region=False):
     rps = np.array(rps)
 
     wave_CA = np.arange(1000, dtype=float) * 0.0109907 + 8540.67304823
-    
+
     wave_SI = np.arange(872, dtype=float) * 0.0144423 + 10818.6544101
 
     formatted_string_ca, obs_ca = make_observation_object(
@@ -952,7 +957,7 @@ def make_rps_inversion_plots(rps=None, indexes=None):
     ind_10827 = nzind[nzind_10827]
 
     base_write_bath = Path('/mn/stornext/u3/harshm/Documents/Data/GRIS/KMeans-Inversions/Plots')
-    
+
     t = tqdm(total=rps.shape[0], desc="Generating plots", unit="RP")
 
     for index, rp in enumerate(rps):
@@ -982,7 +987,7 @@ def make_rps_inversion_plots(rps=None, indexes=None):
     finputprofs.close()
 
     fprofsresult.close()
-    
+
     fatmosresult.close()
 
 
@@ -1016,7 +1021,7 @@ def calculate_continuum_correction():
     median_profile_10827 = np.median(finputprofs['profiles'][0, 0, median_rps][:, ind_10827, 0], axis=0)
 
     synthesized_profile_8542 = np.median(fprofsresult['profiles'][0, 0, median_rps][:, ind_8542, 0], axis=0)
-    
+
     synthesized_profile_10827 = np.median(fprofsresult['profiles'][0, 0, median_rps][:, ind_10827, 0], axis=0)
 
     plt.plot(median_profile_8542, color='black')
@@ -1103,6 +1108,281 @@ def generate_input_atmos_file(
         base_path / 'KMeans-Inversions' / 'atmos_{}_{}.nc'.format(length, name)
     )
 
+
+def get_rp_atmos(rp_file):
+
+    f = h5py.File(rp_file, 'r')
+
+    temp = f['temp'][0, 0]
+    vlos = f['vlos'][0, 0]
+    vturb = f['vturb'][0, 0]
+
+    f.close()
+
+    return temp, vlos, vturb
+
+
+def save_pixel_indices_for_rps(
+    write_path,
+    rps,
+    rps_name,
+    label_key_name='final_labels_1'
+):
+    """
+    Save pixel indices for given representative profiles (RPs) based on the label map.
+
+    Parameters
+    ----------
+    write_path : Path
+        Directory where output HDF5 file will be written.
+    rps : list or array
+        List of representative profile labels to extract pixel indices for.
+    rps_name : str
+        Name identifier used in the output filename.
+    label_key_name : str, optional
+        Name of the dataset in the HDF5 file containing labels (default: 'final_labels_1').
+    """
+
+    # Read labels
+    with h5py.File(kmeans_file, 'r') as f:
+        labels = f[label_key_name][()]
+
+    coord_lists = [[] for _ in range(labels.ndim)]  # a_list, b_list, (c_list if 3D)
+    rp_values = []
+
+    # Collect indices for each representative profile
+    for rp in rps:
+        indices = np.where(labels == rp)
+        for dim, coord in enumerate(indices):
+            coord_lists[dim].extend(coord.tolist())
+        rp_values.extend([rp] * len(indices[0]))
+
+    # Convert lists to numpy arrays
+    coord_arrays = [np.array(coords, dtype=np.int64) for coords in coord_lists]
+    rp_array = np.array(rp_values, dtype=np.int64)
+
+    # Prepare final array: shape = (ndim + 1, N)
+    num_dims = labels.ndim
+    num_points = rp_array.size
+    pixel_indices = np.zeros((num_dims + 1, num_points), dtype=np.int64)
+
+    for i, arr in enumerate(coord_arrays):
+        pixel_indices[i] = arr
+    pixel_indices[num_dims] = rp_array
+
+    # Output filename
+    output_filename = write_path / f'pixel_indices_{rps_name}_total_{num_points}.h5'
+
+    # Write to file
+    with h5py.File(output_filename, 'w') as f_out:
+        f_out['pixel_indices'] = pixel_indices
+
+    print(f"✅ Saved pixel indices for {num_points} pixels → {output_filename}")
+
+    return pixel_indices
+
+
+def combine_rps_atmos():
+    kmeans_inversions = Path("/mn/stornext/u3/harshm/Documents/Data/GRIS/KMeans-Inversions")
+    base_path = kmeans_inversions / "Plots"        # Folder containing Plos_0, Plos_1, ...
+    hdf5_file = kmeans_inversions / "ca_si_rps_stic_profiles_x_100_y_1_t_6_vlos_5_vturb_3_output_atmos.nc"      # Path to your HDF5 file
+
+    # --- Step 1: Load HDF5 datasets into local variables ---
+    with h5py.File(hdf5_file, 'r') as f:
+        temp = f['temp'][()]
+        vlos = f['vlos'][()]
+        vturb = f['vturb'][()]
+
+    print(f"Loaded shapes -> temp: {temp.shape}, vlos: {vlos.shape}, vturb: {vturb.shape}")
+
+    # --- Step 2: Iterate through folders Plos_0 to Plos_99 ---
+    for i in range(100):
+        folder = base_path / f"Plos_{i}"
+        if not folder.is_dir():
+            continue
+
+        # Find file ending with 'output_atmos.nc'
+        nc_files = list(folder.glob("*output_atmos.nc"))
+        if not nc_files:
+            continue
+
+        nc_file = nc_files[0]
+
+        try:
+            # --- Step 3: Open NetCDF file and read variables ---
+            with nc.Dataset(nc_file, 'r') as ds:
+                if 'temp' not in ds.variables or 'vlos' not in ds.variables or 'vturb' not in ds.variables:
+                    print(f"⚠️ Missing required variables in {nc_file}")
+                    continue
+
+                temp_val = ds['temp'][0, 0, 0]
+                vlos_val = ds['vlos'][0, 0, 0]
+                vturb_val = ds['vturb'][0, 0, 0]
+
+            # --- Step 4: Replace corresponding entries in arrays ---
+            temp[0, 0, i] = temp_val
+            vlos[0, 0, i] = vlos_val
+            vturb[0, 0, i] = vturb_val
+
+            print(f"✅ Updated index {i} from {nc_file.name}")
+
+        except Exception as e:
+            print(f"❌ Error processing {nc_file}: {e}")
+
+    # --- Step 5: Done ---
+    print("\nAll folders processed. You can now save temp, vlos, vturb as needed.")
+
+    taumin = -7.8
+    taumax= 1.0
+    dtau = 0.14
+    ntau = int((taumax-taumin)/dtau) + 1
+    ltau_scale = np.arange(ntau, dtype='float64')/(ntau-1.0) * (taumax-taumin) + taumin
+
+    m = sp.model(nx=100, ny=1, nt=1, ndep=ltau_scale.shape[0])
+
+    m.ltau[:, :, :] = ltau_scale
+
+    m.pgas[:, :, :] = 1
+
+    m.temp[:] = temp
+
+    m.vlos[:] = vlos
+
+    m.vturb[:] = vturb
+
+    m.write(kmeans_inversions / "combined_rps_atmos.nc")
+
+
+def make_observation_object_caller(
+    actual_filepath, pixel_indices,
+    write_path,
+    wave_name, wave,
+    core_indice,
+    r_sigma,
+    cont,
+    factor=4,
+    continuum_correction=1,
+    all_weight=0.004,
+    core_weight=0.001,
+    ignore_indice=None,
+    create_sigma_files=False
+):
+
+    data, header = sunpy.io.read_file(actual_filepath)[0]
+
+    if data.ndim == 5:
+        seldata = data[pixel_indices[0], :, pixel_indices[1], pixel_indices[2]]
+        seldata = np.transpose(seldata, axes=(0, 2, 1))
+    else:
+        seldata = data[:, pixel_indices[0], pixel_indices[1]]
+        seldata = np.transpose(seldata, axes=(1, 2, 0))
+
+    _, obs = make_observation_object(
+        write_path=write_path,
+        rps=np.arange(pixel_indices.shape[1]),
+        wave_name=wave_name, wave=wave,
+        rps_profiles=seldata, core_indice=core_indice,
+        r_sigma=r_sigma,
+        cont=cont,
+        factor=factor,
+        continuum_correction=continuum_correction,
+        all_weight=all_weight,
+        core_weight=core_weight,
+        ignore_indice=ignore_indice,
+        create_sigma_files=create_sigma_files
+    )
+
+    return obs
+
+
+def generate_actual_inversion_files_kmeans(
+    actual_filepath_ca,
+    actual_filepath_si,
+    rps_atmos_filepath,
+    rps,
+    rps_name,
+    label_keyname='final_labels_1',
+    previous_output_filename=None,
+    smooth_thermo=None,
+    include_b=False,
+    smooth_b=None
+):
+
+    si_core_indice = [400, 656]
+
+    ca2_core_indice = [0, 226]
+
+    si_ignore_indice = [656, 872]
+
+    # si_ignore_indice = [0, 872]
+
+    wave_name_SI = 'SiI_10827'
+
+    wave_name_CA = 'CaII_8542'
+
+    wave_CA = np.arange(1000, dtype=float) * 0.0109907 + 8540.67304823
+
+    wave_SI = np.arange(872, dtype=float) * 0.0144423 + 10818.6544101
+
+    write_path = base_path / 'KMeans-Inversions'
+
+    temp, vlos, vturb = get_rp_atmos(
+        rps_atmos_filepath
+    )
+
+    pixel_indices = save_pixel_indices_for_rps(
+        write_path,
+        rps,
+        rps_name,
+        label_key_name=label_keyname
+    )
+
+    if pixel_indices.shape[1] == 0:
+        print("None for RPS: {}".format('_'.join(map(str, rps))))
+        sys.exit(0)
+
+    obs_ca = make_observation_object_caller(
+        actual_filepath=actual_filepath_ca,
+        pixel_indices=pixel_indices,
+        write_path=None,
+        wave_name=wave_name_CA, wave=wave_CA,
+        core_indice=ca2_core_indice,
+        r_sigma=None,
+        cont=4.227725e-05,
+        factor=4,
+        continuum_correction=1,
+        all_weight=0.004,
+        core_weight=0.0005,
+        create_sigma_files=False
+    )
+
+    obs_si = make_observation_object_caller(
+        actual_filepath=actual_filepath_si,
+        pixel_indices=pixel_indices,
+        write_path=None,
+        wave_name=wave_name_SI, wave=wave_SI,
+        core_indice=si_core_indice,
+        r_sigma=None,
+        cont=4.0709165e-05,
+        factor=4,
+        continuum_correction=1,
+        all_weight=0.004,
+        core_weight=0.002,
+        ignore_indice=si_ignore_indice,
+        create_sigma_files=False
+    )
+
+    all_profiles = obs_ca + obs_si
+
+    writefilename = 'CA_SI_rps_{}_total_{}.nc'.format(
+        '_'.join(map(str, rps)), pixel_indices.shape[1]
+    )
+
+    all_profiles.write(
+        write_path / writefilename
+    )
+
+
 if __name__ == '__main__':
     # make_rps()
     # make_rps_plots()
@@ -1116,7 +1396,7 @@ if __name__ == '__main__':
     #     )
     # generate_input_atmos_file_from_falc(length=1, in_file='/mnt/d/GRIS/KMeans-Inversions/ca_rps_stic_profiles_x_5_11_16_y_1.nc_level_5_alt_alt_cycle_1_t_7_vl_7_vt_4_falc_atmos.nc')
     # make_rps_inversion_plots()
-    make_rps_inversion_plots(rps=[98])  #, indexes=[91])
+    # make_rps_inversion_plots(rps=[98])  #, indexes=[91])
     # file='/mn/stornext/u3/harshm/Documents/Data/GRIS/KMeans-Inversions/ca_rps_stic_profiles_x_5_11_16_y_1.nc_level_5_alt_alt_cycle_1_t_7_vl_7_vt_4_falc_atmos.nc'
     # file='/mn/stornext/u3/harshm/Documents/Data/GRIS/KMeans-Inversions/ca_si_rps_stic_profiles_x_100_y_1_t_6_vlos_5_vturb_3_output_atmos.nc'
     # file='/mn/stornext/u3/harshm/Documents/Data/GRIS/KMeans-Inversions/Plots/Plots_54/ca_si_rps_stic_profiles_x_54_y_1_t_7_vlos_7_vturb_4_output_atmos.nc'
@@ -1133,3 +1413,20 @@ if __name__ == '__main__':
     #     rps=None
     # )
     # calculate_continuum_correction()
+
+    # combine_rps_atmos()
+
+    actual_filepath_ca = base_path / 'spectralveil_corrected_25Apr25ARM2-003.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
+
+    actual_filepath_si = base_path / 'spectralveil_corrected_25Apr25ARM1-003.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
+
+    rps_atmos_filepath = base_path / 'KMeans-Inversions' / 'combined_rps_atmos.nc'
+
+    generate_actual_inversion_files_kmeans(
+        actual_filepath_ca=actual_filepath_ca,
+        actual_filepath_si=actual_filepath_si,
+        rps_atmos_filepath=rps_atmos_filepath,
+        rps=np.array([1, 11, 12, 16, 17, 22, 25, 27, 28, 29, 31, 32, 34, 36, 41, 42, 48, 49, 51, 52, 54, 56, 57, 60, 61, 62, 63, 64, 65, 67, 68, 69, 71, 72, 77, 80, 85, 86, 87, 88, 89, 90, 92, 97, 98]),
+        rps_name='ssf',
+        label_keyname='final_labels_1'
+    )
