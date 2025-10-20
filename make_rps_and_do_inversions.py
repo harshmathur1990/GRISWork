@@ -1179,12 +1179,14 @@ def save_pixel_indices_for_rps(
 
     print(f"✅ Saved pixel indices for {num_points} pixels → {output_filename}")
 
+    np.savetxt(write_path / '{}.txt'.format(rps_name), rps)
+
     return pixel_indices
 
 
 def combine_rps_atmos():
     kmeans_inversions = Path("/mn/stornext/u3/harshm/Documents/Data/GRIS/KMeans-Inversions")
-    base_path = kmeans_inversions / "Plots"        # Folder containing Plos_0, Plos_1, ...
+    base_path = kmeans_inversions / "Plots"
     hdf5_file = kmeans_inversions / "ca_si_rps_stic_profiles_x_100_y_1_t_6_vlos_5_vturb_3_output_atmos.nc"      # Path to your HDF5 file
 
     # --- Step 1: Load HDF5 datasets into local variables ---
@@ -1295,19 +1297,49 @@ def make_observation_object_caller(
     return obs
 
 
-def generate_actual_inversion_files_kmeans(
-    actual_filepath_ca,
-    actual_filepath_si,
+def generate_input_atmos(
     rps_atmos_filepath,
+    pixel_indices,
     rps,
-    rps_name,
-    label_keyname='final_labels_1',
-    previous_output_filename=None,
-    smooth_thermo=None,
-    include_b=False,
-    smooth_b=None
+    rps_name
 ):
 
+    temp, vlos, vturb = get_rp_atmos(
+        rps_atmos_filepath
+    )
+
+    taumin = -7.8
+    taumax= 1.0
+    dtau = 0.14
+    ntau = int((taumax-taumin)/dtau) + 1
+    ltau_scale = np.arange(ntau, dtype='float64')/(ntau-1.0) * (taumax-taumin) + taumin
+
+    m = sp.model(nx=pixel_indices.shape[1], ny=1, nt=1, ndep=ltau_scale.shape[0])
+
+    m.ltau[:, :, :] = ltau_scale
+
+    m.pgas[:, :, :] = 1.0
+
+    m.temp[0, 0] = temp[pixel_indices[-1]]
+
+    m.vlos[0, 0] = vlos[pixel_indices[-1]]
+
+    m.vturb[0, 0] = vturb[pixel_indices[-1]]
+
+    write_filename = write_path / 'CA_SI_rps_{}_total_{}_initial_atmos.nc'.format(
+        rps_name, pixel_indices.shape[1]
+    )
+
+    m.write(str(write_filename))
+
+
+def write_profiles(
+    pixel_indices,
+    actual_filepath_ca,
+    actual_filepath_si,
+    rps,
+    rps_name
+):
     si_core_indice = [400, 656]
 
     ca2_core_indice = [0, 226]
@@ -1323,19 +1355,6 @@ def generate_actual_inversion_files_kmeans(
     wave_CA = np.arange(1000, dtype=float) * 0.0109907 + 8540.67304823
 
     wave_SI = np.arange(872, dtype=float) * 0.0144423 + 10818.6544101
-
-    write_path = base_path / 'KMeans-Inversions'
-
-    temp, vlos, vturb = get_rp_atmos(
-        rps_atmos_filepath
-    )
-
-    pixel_indices = save_pixel_indices_for_rps(
-        write_path,
-        rps,
-        rps_name,
-        label_key_name=label_keyname
-    )
 
     if pixel_indices.shape[1] == 0:
         print("None for RPS: {}".format('_'.join(map(str, rps))))
@@ -1375,11 +1394,49 @@ def generate_actual_inversion_files_kmeans(
     all_profiles = obs_ca + obs_si
 
     writefilename = 'CA_SI_rps_{}_total_{}.nc'.format(
-        '_'.join(map(str, rps)), pixel_indices.shape[1]
+        rps_name, pixel_indices.shape[1]
     )
 
     all_profiles.write(
         write_path / writefilename
+    )
+
+
+def generate_actual_inversion_files_kmeans(
+    actual_filepath_ca,
+    actual_filepath_si,
+    rps_atmos_filepath,
+    rps,
+    rps_name,
+    label_keyname='final_labels_1',
+    previous_output_filename=None,
+    smooth_thermo=None,
+    include_b=False,
+    smooth_b=None
+):
+
+    write_path = base_path / 'KMeans-Inversions'
+
+    pixel_indices = save_pixel_indices_for_rps(
+        write_path,
+        rps,
+        rps_name,
+        label_key_name=label_keyname
+    )
+
+    write_profiles(
+        pixel_indices=pixel_indices,
+        actual_filepath_ca=actual_filepath_ca,
+        actual_filepath_si=actual_filepath_si,
+        rps=rps,
+        rps_name=rps_name
+    )
+    
+    generate_input_atmos(
+        rps_atmos_filepath=rps_atmos_filepath,
+        pixel_indices=pixel_indices,
+        rps=rps,
+        rps_name=rps_name
     )
 
 
