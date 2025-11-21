@@ -33,6 +33,16 @@ falc_file = base_path / 'FALC.nc'
 rps_plot_write_dir = base_path / 'PCA_RPs_Plots'
 
 
+def get_ltau_scale():
+    taumin = -7.8
+    taumax= 1.0
+    dtau = 0.14
+    ntau = int((taumax-taumin)/dtau) + 1
+    ltau_scale = np.arange(ntau, dtype='float64')/(ntau-1.0) * (taumax-taumin) + taumin
+
+    return ltau_scale
+
+
 def make_rps():
     f = h5py.File(kmeans_file, 'r+')
 
@@ -1073,11 +1083,7 @@ def generate_input_atmos_file(
 
     f = h5py.File(file, 'r')
 
-    taumin = -7.8
-    taumax= 1.0
-    dtau = 0.14
-    ntau = int((taumax-taumin)/dtau) + 1
-    ltau_scale = np.arange(ntau, dtype='float64')/(ntau-1.0) * (taumax-taumin) + taumin
+    ltau_scale = get_ltau_scale()
 
     m = sp.model(nx=length, ny=1, nt=1, ndep=ltau_scale.shape[0])
 
@@ -1234,11 +1240,7 @@ def combine_rps_atmos():
     # --- Step 5: Done ---
     print("\nAll folders processed. You can now save temp, vlos, vturb as needed.")
 
-    taumin = -7.8
-    taumax= 1.0
-    dtau = 0.14
-    ntau = int((taumax-taumin)/dtau) + 1
-    ltau_scale = np.arange(ntau, dtype='float64')/(ntau-1.0) * (taumax-taumin) + taumin
+    ltau_scale = get_ltau_scale()
 
     m = sp.model(nx=100, ny=1, nt=1, ndep=ltau_scale.shape[0])
 
@@ -1302,18 +1304,18 @@ def generate_guess_atmos(
     pixel_indices,
     rps,
     rps_name,
-    write_path
+    write_path,
+    previous_output_filename=None,
+    smooth_thermo=None,
+    include_b=False,
+    smooth_b=None
 ):
 
     temp, vlos, vturb = get_rp_atmos(
         rps_atmos_filepath
     )
 
-    taumin = -7.8
-    taumax= 1.0
-    dtau = 0.14
-    ntau = int((taumax-taumin)/dtau) + 1
-    ltau_scale = np.arange(ntau, dtype='float64')/(ntau-1.0) * (taumax-taumin) + taumin
+    ltau_scale = get_ltau_scale()
 
     m = sp.model(nx=pixel_indices.shape[1], ny=1, nt=1, ndep=ltau_scale.shape[0])
 
@@ -1321,11 +1323,47 @@ def generate_guess_atmos(
 
     m.pgas[:, :, :] = 1.0
 
-    m.temp[0, 0] = temp[pixel_indices[-1]]
+    if previous_output_filename is not None:
 
-    m.vlos[0, 0] = vlos[pixel_indices[-1]]
+        fpo = h5py.File(previous_output_filename, 'r')
 
-    m.vturb[0, 0] = vturb[pixel_indices[-1]]
+        temp = fpo['temp'][()]
+
+        vlos = fpo['vlos'][()]
+
+        vturb = fpo['vturb'][()]
+
+        if smooth_thermo:
+
+            temp = scipy.ndimage.gaussian_filter(temp, sigma=smooth_thermo / 2.355, axes=(1, 2))
+
+            vlos = scipy.ndimage.gaussian_filter(vlos, sigma=smooth_thermo / 2.355, axes=(1, 2))
+
+            vturb = scipy.ndimage.gaussian_filter(vturb, sigma=smooth_thermo / 2.355, axes=(1, 2))
+
+        if pixel_indices.shape[0] == 4:
+
+            m.temp[0, 0] = temp[pixel_indices[0], pixel_indices[1], pixel_indices[2]]
+
+            m.vlos[0, 0] = vlos[pixel_indices[0], pixel_indices[1], pixel_indices[2]]
+
+            m.vturb[0, 0] = vturb[pixel_indices[0], pixel_indices[1], pixel_indices[2]]
+
+        else:
+
+            m.temp[0, 0] = temp[0][pixel_indices[0], pixel_indices[1]]
+
+            m.vlos[0, 0] = vlos[0][pixel_indices[0], pixel_indices[1]]
+
+            m.vturb[0, 0] = vturb[0][pixel_indices[0], pixel_indices[1]]
+
+    else:
+
+        m.temp[0, 0] = temp[pixel_indices[-1]]
+
+        m.vlos[0, 0] = vlos[pixel_indices[-1]]
+
+        m.vturb[0, 0] = vturb[pixel_indices[-1]]
 
     write_filename = write_path / 'CA_SI_rps_{}_total_{}_initial_atmos.nc'.format(
         rps_name, pixel_indices.shape[1]
@@ -1417,7 +1455,7 @@ def generate_actual_inversion_files_kmeans(
     smooth_b=None
 ):
 
-    write_path = base_path / 'KMeans-Inversions'
+    write_path = base_path / 'KMeans-Inversions' / 'fulldata_inversions'
 
     pixel_indices = save_pixel_indices_for_rps(
         write_path,
@@ -1440,8 +1478,110 @@ def generate_actual_inversion_files_kmeans(
         pixel_indices=pixel_indices,
         rps=rps,
         rps_name=rps_name,
-        write_path=write_path
+        write_path=write_path,
+        previous_output_filename=previous_output_filename,
+        smooth_thermo=smooth_thermo,
+        include_b=include_b,
+        smooth_b=smooth_b
     )
+
+
+def merge_atmospheres(
+    output_file,
+    pixel_files,
+    atmos_files,
+    label_key_name='final_labels_1'
+):
+
+    keys = [
+        'temp',
+        'vlos',
+        'vturb',
+        'blong',
+        'nne',
+        'z',
+        'ltau500',
+        'pgas',
+        'rho',
+    ]
+
+    with h5py.File(kmeans_file, 'r') as fl:
+        labels = fl[label_key_name][()]
+
+    f = h5py.File(output_file, 'w')
+    outs = dict()
+
+    ltau_scale = get_ltau_scale()
+
+    for key in keys:
+        if labels.ndim == 3:
+            outs[key] = np.zeros((*labels.shape, ltau_scale.shape[0]), dtype=np.float64)
+        else:
+            outs[key] = np.zeros((1, *labels.shape, ltau_scale.shape[0]), dtype=np.float64)
+
+    for pixel_file, atmos_file in zip(pixel_files, atmos_files):
+        pf = h5py.File(pixel_file, 'r')
+        af = h5py.File(atmos_file, 'r')
+        for key in keys:
+            if pf['pixel_indices'].shape[0] == 4:
+                a, b, c, rp = pf['pixel_indices'][0], pf['pixel_indices'][1], pf['pixel_indices'][2], pf['pixel_indices'][3]
+                outs[key][a, b, c] = af[key][0, 0]
+            else:
+                a, b, rp = pf['pixel_indices'][0], pf['pixel_indices'][1], pf['pixel_indices'][2]
+                outs[key][0, a, b] = af[key][0, 0]
+        pf.close()
+        af.close()
+
+    for key in keys:
+        f[key] = outs[key]
+    f.close()
+
+
+def merge_output_profiles(
+    output_file,
+    pixel_files,
+    profile_files,
+    label_key_name='final_labels_1'
+):
+
+    keys = [
+        'profiles'
+    ]
+
+    with h5py.File(kmeans_file, 'r') as fl:
+        labels = fl[label_key_name][()]
+
+    with h5py.File(profile_files[0], 'r') as fp:
+        wav = fp['wav'][()]
+        nw = wav.shape[0]
+
+    f = h5py.File(output_file, 'w')
+    outs = dict()
+    for key in keys:
+        if labels.ndim == 3:
+            outs[key] = np.zeros((*labels.shape, nw, 4), dtype=np.float64)
+        else:
+            outs[key] = np.zeros((1, *labels.shape, nw, 4), dtype=np.float64)
+
+    for pixel_file, profile_file in zip(pixel_files, profile_files):
+        pf = h5py.File(pixel_file, 'r')
+        af = h5py.File(profile_file, 'r')
+        for key in keys:
+            if pf['pixel_indices'].shape[0] == 4:
+                a, b, c, rp = pf['pixel_indices'][0], pf['pixel_indices'][1], pf['pixel_indices'][2], pf['pixel_indices'][3]
+                outs[key][a, b, c] = af[key][0, 0]
+            else:
+                a, b, rp = pf['pixel_indices'][0], pf['pixel_indices'][1], pf['pixel_indices'][2]
+                outs[key][0, a, b] = af[key][0, 0]
+        pf.close()
+        af.close()
+
+    for key in keys:
+        f[key] = outs[key]
+
+    f['wav'] = wav
+
+    f.close()
 
 
 if __name__ == '__main__':
@@ -1483,11 +1623,104 @@ if __name__ == '__main__':
 
     rps_atmos_filepath = base_path / 'KMeans-Inversions' / 'combined_rps_atmos.nc'
 
+    # generate_actual_inversion_files_kmeans(
+    #     actual_filepath_ca=actual_filepath_ca,
+    #     actual_filepath_si=actual_filepath_si,
+    #     rps_atmos_filepath=rps_atmos_filepath,
+    #     rps=np.array([1, 11, 12, 16, 17, 22, 25, 27, 28, 29, 31, 32, 34, 36, 41, 42, 48, 49, 51, 52, 54, 56, 57, 60, 61, 62, 63, 64, 65, 67, 68, 69, 71, 72, 77, 80, 85, 86, 87, 88, 89, 90, 92, 97, 98]),
+    #     rps_name='ssf',
+    #     label_keyname='final_labels_1'
+    # )
+
+    # generate_actual_inversion_files_kmeans(
+    #     actual_filepath_ca=actual_filepath_ca,
+    #     actual_filepath_si=actual_filepath_si,
+    #     rps_atmos_filepath=rps_atmos_filepath,
+    #     rps=np.array([2, 3, 4, 5, 7, 8, 9, 10, 13, 14, 15, 18, 19, 20, 21, 23, 24, 26, 30, 33, 35, 38, 39, 40, 43, 44, 45, 46, 47, 50, 53, 55, 58, 59, 66, 70, 73, 74, 75, 76, 78, 79, 81, 82, 83, 84, 89, 91, 93, 94, 95, 96, 99]),
+    #     rps_name='sft',
+    #     label_keyname='final_labels_1'
+    # )
+
+    # generate_actual_inversion_files_kmeans(
+    #     actual_filepath_ca=actual_filepath_ca,
+    #     actual_filepath_si=actual_filepath_si,
+    #     rps_atmos_filepath=rps_atmos_filepath,
+    #     rps=np.array([6, 37]),
+    #     rps_name='nsf',
+    #     label_keyname='final_labels_1'
+    # )
+
+    # generate_actual_inversion_files_kmeans(
+    #     actual_filepath_ca=actual_filepath_ca,
+    #     actual_filepath_si=actual_filepath_si,
+    #     rps_atmos_filepath=rps_atmos_filepath,
+    #     rps=np.array([0]),
+    #     rps_name='fsf',
+    #     label_keyname='final_labels_1'
+    # )
+
+    data_path = base_path / 'KMeans-Inversions' / 'fulldata_inversions'
+
+    # pixel_files = [
+    #     data_path / 'pixel_indices_ssf_total_78993.h5',
+    #     data_path / 'pixel_indices_sft_total_35579.h5',
+    #     data_path / 'pixel_indices_nsf_total_2647.h5',
+    #     data_path / 'pixel_indices_fsf_total_261.h5'
+    # ]
+
+    # atmos_files = [
+    #     data_path / 'CA_SI_rps_ssf_total_78993_t_7_vlos_7_vturb_4_output_atmos.nc',
+    #     data_path / 'CA_SI_rps_sft_total_35579_t_6_vlos_5_vturb_3_output_atmos.nc',
+    #     data_path / 'CA_SI_rps_nsf_total_2647_t_9_vlos_7_vturb_4_output_atmos.nc',
+    #     data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_output_atmos.nc'
+    # ]
+
+    # profile_files =  [
+    #     data_path / 'CA_SI_rps_ssf_total_78993_t_7_vlos_7_vturb_4_output_profs.nc',
+    #     data_path / 'CA_SI_rps_sft_total_35579_t_6_vlos_5_vturb_3_output_profs.nc',
+    #     data_path / 'CA_SI_rps_nsf_total_2647_t_9_vlos_7_vturb_4_output_profs.nc',
+    #     data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_output_profs.nc'
+    # ]
+
+    output_merged_atmos = data_path / 'combined_output_atmos_no_B_cycle_1.nc'
+
+    # output_merged_profs = data_path / 'combined_output_profs_no_B_cycle_1.nc'
+
+    # merge_atmospheres(
+    #     output_file=output_merged_atmos,
+    #     pixel_files=pixel_files,
+    #     atmos_files=atmos_files
+    # )
+
+    # merge_output_profiles(
+    #     output_file=output_merged_profs,
+    #     pixel_files=pixel_files,
+    #     profile_files=profile_files
+    # )
+
+    # generate_actual_inversion_files_kmeans(
+    #     actual_filepath_ca=actual_filepath_ca,
+    #     actual_filepath_si=actual_filepath_si,
+    #     rps_atmos_filepath=rps_atmos_filepath,
+    #     rps=np.array([1, 11, 12, 16, 17, 22, 25, 27, 28, 29, 31, 32, 34, 36, 41, 42, 48, 49, 51, 52, 54, 56, 57, 60, 61, 62, 63, 64, 65, 67, 68, 69, 71, 72, 77, 80, 85, 86, 87, 88, 89, 90, 92, 97, 98]),
+    #     rps_name='ssf',
+    #     label_keyname='final_labels_1',
+    #     previous_output_filename=output_merged_atmos,
+    #     smooth_thermo=3,
+    #     include_b=False,
+    #     smooth_b=None
+    # )
+
     generate_actual_inversion_files_kmeans(
         actual_filepath_ca=actual_filepath_ca,
         actual_filepath_si=actual_filepath_si,
         rps_atmos_filepath=rps_atmos_filepath,
-        rps=np.array([1, 11, 12, 16, 17, 22, 25, 27, 28, 29, 31, 32, 34, 36, 41, 42, 48, 49, 51, 52, 54, 56, 57, 60, 61, 62, 63, 64, 65, 67, 68, 69, 71, 72, 77, 80, 85, 86, 87, 88, 89, 90, 92, 97, 98]),
-        rps_name='ssf',
-        label_keyname='final_labels_1'
+        rps=np.array([2, 3, 4, 5, 7, 8, 9, 10, 13, 14, 15, 18, 19, 20, 21, 23, 24, 26, 30, 33, 35, 38, 39, 40, 43, 44, 45, 46, 47, 50, 53, 55, 58, 59, 66, 70, 73, 74, 75, 76, 78, 79, 81, 82, 83, 84, 89, 91, 93, 94, 95, 96, 99]),
+        rps_name='sft',
+        label_keyname='final_labels_1',
+        previous_output_filename=output_merged_atmos,
+        smooth_thermo=3,
+        include_b=False,
+        smooth_b=None
     )
+
