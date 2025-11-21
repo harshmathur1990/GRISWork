@@ -1711,12 +1711,25 @@ if __name__ == '__main__':
     #     smooth_b=None
     # )
 
+    # generate_actual_inversion_files_kmeans(
+    #     actual_filepath_ca=actual_filepath_ca,
+    #     actual_filepath_si=actual_filepath_si,
+    #     rps_atmos_filepath=rps_atmos_filepath,
+    #     rps=np.array([2, 3, 4, 5, 7, 8, 9, 10, 13, 14, 15, 18, 19, 20, 21, 23, 24, 26, 30, 33, 35, 38, 39, 40, 43, 44, 45, 46, 47, 50, 53, 55, 58, 59, 66, 70, 73, 74, 75, 76, 78, 79, 81, 82, 83, 84, 89, 91, 93, 94, 95, 96, 99]),
+    #     rps_name='sft',
+    #     label_keyname='final_labels_1',
+        # previous_output_filename=output_merged_atmos,
+        # smooth_thermo=3,
+        # include_b=False,
+        # smooth_b=None
+    # )
+
     generate_actual_inversion_files_kmeans(
         actual_filepath_ca=actual_filepath_ca,
         actual_filepath_si=actual_filepath_si,
         rps_atmos_filepath=rps_atmos_filepath,
-        rps=np.array([2, 3, 4, 5, 7, 8, 9, 10, 13, 14, 15, 18, 19, 20, 21, 23, 24, 26, 30, 33, 35, 38, 39, 40, 43, 44, 45, 46, 47, 50, 53, 55, 58, 59, 66, 70, 73, 74, 75, 76, 78, 79, 81, 82, 83, 84, 89, 91, 93, 94, 95, 96, 99]),
-        rps_name='sft',
+        rps=np.array([6, 37]),
+        rps_name='nsf',
         label_keyname='final_labels_1',
         previous_output_filename=output_merged_atmos,
         smooth_thermo=3,
