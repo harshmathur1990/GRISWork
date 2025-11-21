@@ -1661,12 +1661,12 @@ if __name__ == '__main__':
 
     data_path = base_path / 'KMeans-Inversions' / 'fulldata_inversions'
 
-    # pixel_files = [
-    #     data_path / 'pixel_indices_ssf_total_78993.h5',
-    #     data_path / 'pixel_indices_sft_total_35579.h5',
-    #     data_path / 'pixel_indices_nsf_total_2647.h5',
-    #     data_path / 'pixel_indices_fsf_total_261.h5'
-    # ]
+    pixel_files = [
+        data_path / 'pixel_indices_ssf_total_78993.h5',
+        data_path / 'pixel_indices_sft_total_35579.h5',
+        data_path / 'pixel_indices_nsf_total_2647.h5',
+        data_path / 'pixel_indices_fsf_total_261.h5'
+    ]
 
     # atmos_files = [
     #     data_path / 'CA_SI_rps_ssf_total_78993_t_7_vlos_7_vturb_4_output_atmos.nc',
@@ -1682,7 +1682,7 @@ if __name__ == '__main__':
     #     data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_output_profs.nc'
     # ]
 
-    output_merged_atmos = data_path / 'combined_output_atmos_no_B_cycle_1.nc'
+    # output_merged_atmos = data_path / 'combined_output_atmos_no_B_cycle_1.nc'
 
     # output_merged_profs = data_path / 'combined_output_profs_no_B_cycle_1.nc'
 
@@ -1737,15 +1737,45 @@ if __name__ == '__main__':
     #     smooth_b=None
     # )
 
-    generate_actual_inversion_files_kmeans(
-        actual_filepath_ca=actual_filepath_ca,
-        actual_filepath_si=actual_filepath_si,
-        rps_atmos_filepath=rps_atmos_filepath,
-        rps=np.array([0]),
-        rps_name='fsf',
-        label_keyname='final_labels_1',
-        previous_output_filename=output_merged_atmos,
-        smooth_thermo=3,
-        include_b=False,
-        smooth_b=None
+    # generate_actual_inversion_files_kmeans(
+    #     actual_filepath_ca=actual_filepath_ca,
+    #     actual_filepath_si=actual_filepath_si,
+    #     rps_atmos_filepath=rps_atmos_filepath,
+    #     rps=np.array([0]),
+    #     rps_name='fsf',
+    #     label_keyname='final_labels_1',
+    #     previous_output_filename=output_merged_atmos,
+    #     smooth_thermo=3,
+    #     include_b=False,
+    #     smooth_b=None
+    # )
+
+    atmos_files = [
+        data_path / 'CA_SI_rps_ssf_total_78993_t_7_vlos_7_vturb_4_output_atmos_cycle_2.nc',
+        data_path / 'CA_SI_rps_sft_total_35579_t_6_vlos_5_vturb_3_output_atmos_cycle_2.nc',
+        data_path / 'CA_SI_rps_nsf_total_2647_t_9_vlos_7_vturb_4_output_atmos_cycle_2.nc',
+        data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_output_atmos_cycle_2.nc'
+    ]
+
+    profile_files =  [
+        data_path / 'CA_SI_rps_ssf_total_78993_t_7_vlos_7_vturb_4_output_profs_cycle_2.nc',
+        data_path / 'CA_SI_rps_sft_total_35579_t_6_vlos_5_vturb_3_output_profs_cycle_2.nc',
+        data_path / 'CA_SI_rps_nsf_total_2647_t_9_vlos_7_vturb_4_output_profs_cycle_2.nc',
+        data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_output_profs_cycle_2.nc'
+    ]
+
+    output_merged_atmos = data_path / 'combined_output_atmos_no_B_cycle_2.nc'
+
+    output_merged_profs = data_path / 'combined_output_profs_no_B_cycle_2.nc'
+
+    merge_atmospheres(
+        output_file=output_merged_atmos,
+        pixel_files=pixel_files,
+        atmos_files=atmos_files
+    )
+
+    merge_output_profiles(
+        output_file=output_merged_profs,
+        pixel_files=pixel_files,
+        profile_files=profile_files
     )
