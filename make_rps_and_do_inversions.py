@@ -1724,16 +1724,28 @@ if __name__ == '__main__':
         # smooth_b=None
     # )
 
+    # generate_actual_inversion_files_kmeans(
+    #     actual_filepath_ca=actual_filepath_ca,
+    #     actual_filepath_si=actual_filepath_si,
+    #     rps_atmos_filepath=rps_atmos_filepath,
+    #     rps=np.array([6, 37]),
+    #     rps_name='nsf',
+    #     label_keyname='final_labels_1',
+    #     previous_output_filename=output_merged_atmos,
+    #     smooth_thermo=3,
+    #     include_b=False,
+    #     smooth_b=None
+    # )
+
     generate_actual_inversion_files_kmeans(
         actual_filepath_ca=actual_filepath_ca,
         actual_filepath_si=actual_filepath_si,
         rps_atmos_filepath=rps_atmos_filepath,
-        rps=np.array([6, 37]),
-        rps_name='nsf',
+        rps=np.array([0]),
+        rps_name='fsf',
         label_keyname='final_labels_1',
         previous_output_filename=output_merged_atmos,
         smooth_thermo=3,
         include_b=False,
         smooth_b=None
     )
-
