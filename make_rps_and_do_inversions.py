@@ -1768,14 +1768,67 @@ if __name__ == '__main__':
 
     output_merged_profs = data_path / 'combined_output_profs_no_B_cycle_2.nc'
 
-    merge_atmospheres(
-        output_file=output_merged_atmos,
-        pixel_files=pixel_files,
-        atmos_files=atmos_files
+    # merge_atmospheres(
+    #     output_file=output_merged_atmos,
+    #     pixel_files=pixel_files,
+    #     atmos_files=atmos_files
+    # )
+
+    # merge_output_profiles(
+    #     output_file=output_merged_profs,
+    #     pixel_files=pixel_files,
+    #     profile_files=profile_files
+    # )
+
+    generate_actual_inversion_files_kmeans(
+        actual_filepath_ca=actual_filepath_ca,
+        actual_filepath_si=actual_filepath_si,
+        rps_atmos_filepath=rps_atmos_filepath,
+        rps=np.array([1, 11, 12, 16, 17, 22, 25, 27, 28, 29, 31, 32, 34, 36, 41, 42, 48, 49, 51, 52, 54, 56, 57, 60, 61, 62, 63, 64, 65, 67, 68, 69, 71, 72, 77, 80, 85, 86, 87, 88, 89, 90, 92, 97, 98]),
+        rps_name='ssf',
+        label_keyname='final_labels_1',
+        previous_output_filename=output_merged_atmos,
+        smooth_thermo=3,
+        include_b=False,
+        smooth_b=None
     )
 
-    merge_output_profiles(
-        output_file=output_merged_profs,
-        pixel_files=pixel_files,
-        profile_files=profile_files
+    generate_actual_inversion_files_kmeans(
+        actual_filepath_ca=actual_filepath_ca,
+        actual_filepath_si=actual_filepath_si,
+        rps_atmos_filepath=rps_atmos_filepath,
+        rps=np.array([2, 3, 4, 5, 7, 8, 9, 10, 13, 14, 15, 18, 19, 20, 21, 23, 24, 26, 30, 33, 35, 38, 39, 40, 43, 44, 45, 46, 47, 50, 53, 55, 58, 59, 66, 70, 73, 74, 75, 76, 78, 79, 81, 82, 83, 84, 89, 91, 93, 94, 95, 96, 99]),
+        rps_name='sft',
+        label_keyname='final_labels_1',
+        previous_output_filename=output_merged_atmos,
+        smooth_thermo=3,
+        include_b=False,
+        smooth_b=None
     )
+
+    generate_actual_inversion_files_kmeans(
+        actual_filepath_ca=actual_filepath_ca,
+        actual_filepath_si=actual_filepath_si,
+        rps_atmos_filepath=rps_atmos_filepath,
+        rps=np.array([6, 37]),
+        rps_name='nsf',
+        label_keyname='final_labels_1',
+        previous_output_filename=output_merged_atmos,
+        smooth_thermo=3,
+        include_b=False,
+        smooth_b=None
+    )
+
+    generate_actual_inversion_files_kmeans(
+        actual_filepath_ca=actual_filepath_ca,
+        actual_filepath_si=actual_filepath_si,
+        rps_atmos_filepath=rps_atmos_filepath,
+        rps=np.array([0]),
+        rps_name='fsf',
+        label_keyname='final_labels_1',
+        previous_output_filename=output_merged_atmos,
+        smooth_thermo=3,
+        include_b=False,
+        smooth_b=None
+    )
+
