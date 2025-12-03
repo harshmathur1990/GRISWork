@@ -1374,7 +1374,7 @@ def generate_guess_atmos(
 
             # Optional magnetic field
             if include_b:
-                blos = f["blos"][()] if blos in list(f.keys()) else np.ones_like(temp) * init_b
+                blos = f["blos"][()] if "blos" in list(f.keys()) else np.ones_like(temp) * init_b
                 blos = apply_smoothing(blos, smooth_b, is_cube)
                 m.Bln[0, 0] = extract_pixel(blos, pixel_indices)
 
