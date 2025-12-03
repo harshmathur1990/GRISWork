@@ -626,7 +626,8 @@ def make_observation_object(
     all_weight=0.004,
     core_weight=0.001,
     ignore_indice=None,
-    create_sigma_files=False
+    create_sigma_files=False,
+    include_b=False
 ):
     wc, ic = findgrid(wave, (wave[1] - wave[0]) / factor, extra=8)
 
@@ -643,8 +644,15 @@ def make_observation_object(
     obs.weights[ic, 0] = all_weight
     obs.weights[ic[core_indice[0]:core_indice[1]], 0] = core_weight
 
+    if include_b:
+        obs.weights[ic, 3] = obs.weights[ic, 0] / 4
+        obs.weights[ic[core_indice[0]:core_indice[1]], 3] = obs.weights[ic[core_indice[0]:core_indice[1]], 0] / 4
+
     if ignore_indice is not None:
         obs.weights[ic[ignore_indice[0]:ignore_indice[1]], 0] = 1e16
+
+        if include_b:
+            obs.weights[ic[ignore_indice[0]:ignore_indice[1]], 3] = 1e16
 
     formatted_string = ''
 
@@ -1269,7 +1277,8 @@ def make_observation_object_caller(
     all_weight=0.004,
     core_weight=0.001,
     ignore_indice=None,
-    create_sigma_files=False
+    create_sigma_files=False,
+    include_b=False
 ):
 
     data, header = sunpy.io.read_file(actual_filepath)[0]
@@ -1293,7 +1302,8 @@ def make_observation_object_caller(
         all_weight=all_weight,
         core_weight=core_weight,
         ignore_indice=ignore_indice,
-        create_sigma_files=create_sigma_files
+        create_sigma_files=create_sigma_files,
+        include_b=include_b
     )
 
     return obs
@@ -1310,66 +1320,81 @@ def generate_guess_atmos(
     include_b=False,
     smooth_b=None
 ):
+    """Generate initial guess atmosphere for inversion."""
 
-    temp, vlos, vturb = get_rp_atmos(
-        rps_atmos_filepath
-    )
+    # --- Helpers --------------------------------------------------------------
 
+    def apply_smoothing(arr, sigma, is_cube):
+        """Smooth array over spatial axes depending on dimension."""
+        if sigma is None:
+            return arr
+        axes = (1, 2) if is_cube else (0, 1)
+        return scipy.ndimage.gaussian_filter(arr, sigma=sigma / 2.355, axes=axes)
+
+    def extract_pixel(arr, idx):
+        """Extract the physical atmosphere for selected pixel."""
+        if is_cube:
+            return arr[idx[0], idx[1], idx[2]]
+        return arr[0][idx[0], idx[1]]
+
+    # --------------------------------------------------------------------------
+
+    # Load reference atmosphere
+    temp, vlos, vturb = get_rp_atmos(rps_atmos_filepath)
     ltau_scale = get_ltau_scale()
 
-    m = sp.model(nx=pixel_indices.shape[1], ny=1, nt=1, ndep=ltau_scale.shape[0])
+    nx = pixel_indices.shape[1]
+    is_cube = pixel_indices.shape[0] == 4
 
+    # Initialize model
+    m = sp.model(nx=nx, ny=1, nt=1, ndep=ltau_scale.shape[0])
     m.ltau[:, :, :] = ltau_scale
-
     m.pgas[:, :, :] = 1.0
 
+    # --------------------------------------------------------------------------
+    # CASE A — Using previous output
+    # --------------------------------------------------------------------------
     if previous_output_filename is not None:
 
-        fpo = h5py.File(previous_output_filename, 'r')
+        with h5py.File(previous_output_filename, "r") as f:
+            temp = f["temp"][()]
+            vlos = f["vlos"][()]
+            vturb = f["vturb"][()]
 
-        temp = fpo['temp'][()]
+            # Smooth thermodynamic quantities
+            temp = apply_smoothing(temp, smooth_thermo, is_cube)
+            vlos = apply_smoothing(vlos, smooth_thermo, is_cube)
+            vturb = apply_smoothing(vturb, smooth_thermo, is_cube)
 
-        vlos = fpo['vlos'][()]
+            # Assign values
+            m.temp[0, 0] = extract_pixel(temp, pixel_indices)
+            m.vlos[0, 0] = extract_pixel(vlos, pixel_indices)
+            m.vturb[0, 0] = extract_pixel(vturb, pixel_indices)
 
-        vturb = fpo['vturb'][()]
+            # Optional magnetic field
+            if include_b:
+                blos = f["blos"][()]
+                blos = apply_smoothing(blos, smooth_b, is_cube)
+                m.Bln[0, 0] = extract_pixel(blos, pixel_indices)
 
-        if smooth_thermo:
-
-            temp = scipy.ndimage.gaussian_filter(temp, sigma=smooth_thermo / 2.355, axes=(1, 2))
-
-            vlos = scipy.ndimage.gaussian_filter(vlos, sigma=smooth_thermo / 2.355, axes=(1, 2))
-
-            vturb = scipy.ndimage.gaussian_filter(vturb, sigma=smooth_thermo / 2.355, axes=(1, 2))
-
-        if pixel_indices.shape[0] == 4:
-
-            m.temp[0, 0] = temp[pixel_indices[0], pixel_indices[1], pixel_indices[2]]
-
-            m.vlos[0, 0] = vlos[pixel_indices[0], pixel_indices[1], pixel_indices[2]]
-
-            m.vturb[0, 0] = vturb[pixel_indices[0], pixel_indices[1], pixel_indices[2]]
-
-        else:
-
-            m.temp[0, 0] = temp[0][pixel_indices[0], pixel_indices[1]]
-
-            m.vlos[0, 0] = vlos[0][pixel_indices[0], pixel_indices[1]]
-
-            m.vturb[0, 0] = vturb[0][pixel_indices[0], pixel_indices[1]]
-
+    # --------------------------------------------------------------------------
+    # CASE B — No previous output
+    # --------------------------------------------------------------------------
     else:
+        # last index entry → direct 1D access
+        idx = pixel_indices[-1]
+        m.temp[0, 0] = temp[idx]
+        m.vlos[0, 0] = vlos[idx]
+        m.vturb[0, 0] = vturb[idx]
 
-        m.temp[0, 0] = temp[pixel_indices[-1]]
+    # --------------------------------------------------------------------------
+    # Write file
+    # --------------------------------------------------------------------------
 
-        m.vlos[0, 0] = vlos[pixel_indices[-1]]
-
-        m.vturb[0, 0] = vturb[pixel_indices[-1]]
-
-    write_filename = write_path / 'CA_SI_rps_{}_total_{}_initial_atmos.nc'.format(
-        rps_name, pixel_indices.shape[1]
-    )
-
+    outname = f"CA_SI_rps_{rps_name}_total_{nx}_initial_atmos.nc"
+    write_filename = write_path / outname
     m.write(str(write_filename))
+
 
 
 def write_profiles(
@@ -1378,7 +1403,8 @@ def write_profiles(
     actual_filepath_si,
     rps,
     rps_name,
-    write_path
+    write_path,
+    include_b=False
 ):
     si_core_indice = [400, 656]
 
@@ -1412,7 +1438,8 @@ def write_profiles(
         continuum_correction=1,
         all_weight=0.004,
         core_weight=0.0005,
-        create_sigma_files=False
+        create_sigma_files=False,
+        include_b=include_b
     )
 
     obs_si = make_observation_object_caller(
@@ -1428,7 +1455,8 @@ def write_profiles(
         all_weight=0.004,
         core_weight=0.002,
         ignore_indice=si_ignore_indice,
-        create_sigma_files=False
+        create_sigma_files=False,
+        include_b=include_b
     )
 
     all_profiles = obs_ca + obs_si
@@ -1470,7 +1498,8 @@ def generate_actual_inversion_files_kmeans(
         actual_filepath_si=actual_filepath_si,
         rps=rps,
         rps_name=rps_name,
-        write_path=write_path
+        write_path=write_path,
+        include_b=include_b
     )
     
     generate_guess_atmos(
@@ -1914,32 +1943,84 @@ if __name__ == '__main__':
     #     smooth_b=None
     # )
 
-    atmos_files = [
-        data_path / 'CA_SI_rps_ssf_total_78993_t_7_vlos_7_vturb_4_output_atmos_cycle_4.nc',
-        data_path / 'CA_SI_rps_sft_total_35579_t_6_vlos_5_vturb_3_output_atmos_cycle_4.nc',
-        data_path / 'CA_SI_rps_nsf_total_2647_t_9_vlos_7_vturb_4_output_atmos_cycle_4.nc',
-        data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_output_atmos_cycle_4.nc'
-    ]
+    # atmos_files = [
+    #     data_path / 'CA_SI_rps_ssf_total_78993_t_7_vlos_7_vturb_4_output_atmos_cycle_4.nc',
+    #     data_path / 'CA_SI_rps_sft_total_35579_t_6_vlos_5_vturb_3_output_atmos_cycle_4.nc',
+    #     data_path / 'CA_SI_rps_nsf_total_2647_t_9_vlos_7_vturb_4_output_atmos_cycle_4.nc',
+    #     data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_output_atmos_cycle_4.nc'
+    # ]
 
-    profile_files =  [
-        data_path / 'CA_SI_rps_ssf_total_78993_t_7_vlos_7_vturb_4_output_profs_cycle_4.nc',
-        data_path / 'CA_SI_rps_sft_total_35579_t_6_vlos_5_vturb_3_output_profs_cycle_4.nc',
-        data_path / 'CA_SI_rps_nsf_total_2647_t_9_vlos_7_vturb_4_output_profs_cycle_4.nc',
-        data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_output_profs_cycle_4.nc'
-    ]
+    # profile_files =  [
+    #     data_path / 'CA_SI_rps_ssf_total_78993_t_7_vlos_7_vturb_4_output_profs_cycle_4.nc',
+    #     data_path / 'CA_SI_rps_sft_total_35579_t_6_vlos_5_vturb_3_output_profs_cycle_4.nc',
+    #     data_path / 'CA_SI_rps_nsf_total_2647_t_9_vlos_7_vturb_4_output_profs_cycle_4.nc',
+    #     data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_output_profs_cycle_4.nc'
+    # ]
 
     output_merged_atmos = data_path / 'combined_output_atmos_no_B_cycle_4.nc'
 
     output_merged_profs = data_path / 'combined_output_profs_no_B_cycle_4.nc'
 
-    merge_atmospheres(
-        output_file=output_merged_atmos,
-        pixel_files=pixel_files,
-        atmos_files=atmos_files
+    # merge_atmospheres(
+    #     output_file=output_merged_atmos,
+    #     pixel_files=pixel_files,
+    #     atmos_files=atmos_files
+    # )
+
+    # merge_output_profiles(
+    #     output_file=output_merged_profs,
+    #     pixel_files=pixel_files,
+    #     profile_files=profile_files
+    # )
+
+    generate_actual_inversion_files_kmeans(
+        actual_filepath_ca=actual_filepath_ca,
+        actual_filepath_si=actual_filepath_si,
+        rps_atmos_filepath=rps_atmos_filepath,
+        rps=np.array([1, 11, 12, 16, 17, 22, 25, 27, 28, 29, 31, 32, 34, 36, 41, 42, 48, 49, 51, 52, 54, 56, 57, 60, 61, 62, 63, 64, 65, 67, 68, 69, 71, 72, 77, 80, 85, 86, 87, 88, 89, 90, 92, 97, 98]),
+        rps_name='ssf',
+        label_keyname='final_labels_1',
+        previous_output_filename=output_merged_atmos,
+        smooth_thermo=None,
+        include_b=True,
+        smooth_b=None
     )
 
-    merge_output_profiles(
-        output_file=output_merged_profs,
-        pixel_files=pixel_files,
-        profile_files=profile_files
+    generate_actual_inversion_files_kmeans(
+        actual_filepath_ca=actual_filepath_ca,
+        actual_filepath_si=actual_filepath_si,
+        rps_atmos_filepath=rps_atmos_filepath,
+        rps=np.array([2, 3, 4, 5, 7, 8, 9, 10, 13, 14, 15, 18, 19, 20, 21, 23, 24, 26, 30, 33, 35, 38, 39, 40, 43, 44, 45, 46, 47, 50, 53, 55, 58, 59, 66, 70, 73, 74, 75, 76, 78, 79, 81, 82, 83, 84, 89, 91, 93, 94, 95, 96, 99]),
+        rps_name='sft',
+        label_keyname='final_labels_1',
+        previous_output_filename=output_merged_atmos,
+        smooth_thermo=None,
+        include_b=True,
+        smooth_b=None
+    )
+
+    generate_actual_inversion_files_kmeans(
+        actual_filepath_ca=actual_filepath_ca,
+        actual_filepath_si=actual_filepath_si,
+        rps_atmos_filepath=rps_atmos_filepath,
+        rps=np.array([6, 37]),
+        rps_name='nsf',
+        label_keyname='final_labels_1',
+        previous_output_filename=output_merged_atmos,
+        smooth_thermo=None,
+        include_b=True,
+        smooth_b=None
+    )
+
+    generate_actual_inversion_files_kmeans(
+        actual_filepath_ca=actual_filepath_ca,
+        actual_filepath_si=actual_filepath_si,
+        rps_atmos_filepath=rps_atmos_filepath,
+        rps=np.array([0]),
+        rps_name='fsf',
+        label_keyname='final_labels_1',
+        previous_output_filename=output_merged_atmos,
+        smooth_thermo=None,
+        include_b=True,
+        smooth_b=None
     )
