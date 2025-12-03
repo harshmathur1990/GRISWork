@@ -1318,7 +1318,8 @@ def generate_guess_atmos(
     previous_output_filename=None,
     smooth_thermo=None,
     include_b=False,
-    smooth_b=None
+    smooth_b=None,
+    init_b=500
 ):
     """Generate initial guess atmosphere for inversion."""
 
@@ -1373,7 +1374,7 @@ def generate_guess_atmos(
 
             # Optional magnetic field
             if include_b:
-                blos = f["blos"][()]
+                blos = f["blos"][()] if blos in list(f.keys()) else np.ones_like(temp) * init_b
                 blos = apply_smoothing(blos, smooth_b, is_cube)
                 m.Bln[0, 0] = extract_pixel(blos, pixel_indices)
 
@@ -1480,7 +1481,8 @@ def generate_actual_inversion_files_kmeans(
     previous_output_filename=None,
     smooth_thermo=None,
     include_b=False,
-    smooth_b=None
+    smooth_b=None,
+    init_b=500
 ):
 
     write_path = base_path / 'KMeans-Inversions' / 'fulldata_inversions'
@@ -1511,7 +1513,8 @@ def generate_actual_inversion_files_kmeans(
         previous_output_filename=previous_output_filename,
         smooth_thermo=smooth_thermo,
         include_b=include_b,
-        smooth_b=smooth_b
+        smooth_b=smooth_b,
+        init_b=init_b
     )
 
 
