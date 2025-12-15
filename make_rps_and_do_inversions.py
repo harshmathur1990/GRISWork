@@ -2206,18 +2206,18 @@ if __name__ == '__main__':
         data_path / 'CA_SI_rps_ssf_total_78993_t_7_vlos_7_vturb_4_blong_2_output_profs_cycle_B_3.nc',
         data_path / 'CA_SI_rps_sft_total_35579_t_6_vlos_5_vturb_3_blong_2_output_profs_cycle_B_3.nc',
         data_path / 'CA_SI_rps_nsf_total_2647_t_9_vlos_7_vturb_4_blong_2_output_profs_cycle_B_3.nc',
-        data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_5_vturb_4_blong_2_output_profs_cycle_B_3.nc'
+        data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_blong_2_output_profs_cycle_B_3.nc'
     ]
 
     output_merged_atmos = data_path / 'combined_output_atmos_cycle_B_3.nc'
 
     output_merged_profs = data_path / 'combined_output_profs_cycle_B_3.nc'
 
-    merge_atmospheres(
-        output_file=output_merged_atmos,
-        pixel_files=pixel_files,
-        atmos_files=atmos_files
-    )
+    # merge_atmospheres(
+    #     output_file=output_merged_atmos,
+    #     pixel_files=pixel_files,
+    #     atmos_files=atmos_files
+    # )
 
     merge_output_profiles(
         output_file=output_merged_profs,
