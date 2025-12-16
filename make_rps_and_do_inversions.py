@@ -1771,7 +1771,7 @@ def make_event_animation_mp4(
     with h5py.File(atmos_h5_path, "r") as f:
         if "ltau500" not in f:
             raise KeyError("Atmos file missing key 'ltau500'")
-        ltau500 = np.array(f["ltau500"][:], dtype=float)
+        ltau500 = np.array(f["ltau500"][0, 0, 0], dtype=float)
 
     tau_idx = {ltv: _nearest_index(ltau500, ltv) for ltv in logtau_values}
     if verbose:
