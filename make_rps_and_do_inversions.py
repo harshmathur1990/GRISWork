@@ -2518,7 +2518,7 @@ if __name__ == '__main__':
     # Example usage:
     # python make_anim.py /path/to/spectra.fits /path/to/atmos.h5 out.mp4 12
 
-    fps = 10
+    fps = 3
     output_mp4 = data_path / 'animation.mp4'
 
     make_event_animation_mp4(
