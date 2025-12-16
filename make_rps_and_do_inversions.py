@@ -1619,6 +1619,296 @@ def merge_output_profiles(
     f.close()
 
 
+"""
+Make an MP4 animation from:
+1) a FITS spectral cube with shape (time, stokes, Y, X, wavelength)
+2) an atmosphere HDF5 file with keys: temp, vlos, vturb, blong
+   each shape (time, Y, X, Nlogtau), and key ltau500 (1D, length Nlogtau)
+
+Panels: 5 x 2
+Row 1: I(8542.09), I(8548.09)
+Row 2: temp(logtau=-4), temp(logtau=-1)
+Row 3: vlos(logtau=-4), vlos(logtau=-1)
+Row 4: vturb(logtau=-4), vturb(logtau=-1)
+Row 5: blong(logtau=-4), blong(logtau=-1)
+
+Each subplot has its own fixed colorbar (vmin/vmax do not change with time).
+"""
+
+import os
+import numpy as np
+import h5py
+import matplotlib.pyplot as plt
+from matplotlib.animation import FFMpegWriter
+
+# FITS reader (standard)
+from astropy.io import fits
+
+
+def _wave_ca_8542(nwave: int = 1000) -> np.ndarray:
+    """Wavelength array given by the user."""
+    return np.arange(nwave, dtype=float) * 0.0109907 + 8540.67304823
+
+
+def _nearest_index(arr_1d: np.ndarray, value: float) -> int:
+    arr_1d = np.asarray(arr_1d)
+    return int(np.argmin(np.abs(arr_1d - value)))
+
+
+def _finite_minmax_update(vmin, vmax, a: np.ndarray):
+    """Update vmin/vmax with finite values from a."""
+    if a is None:
+        return vmin, vmax
+    a = np.asarray(a)
+    mask = np.isfinite(a)
+    if not np.any(mask):
+        return vmin, vmax
+    amin = float(np.min(a[mask]))
+    amax = float(np.max(a[mask]))
+    if vmin is None or amin < vmin:
+        vmin = amin
+    if vmax is None or amax > vmax:
+        vmax = amax
+    return vmin, vmax
+
+
+def _compute_panel_limits(
+    fits_path: str,
+    atmos_h5_path: str,
+    stokes_index: int,
+    widx_list: list[int],
+    tau_indices: dict[float, int],
+    keys=("temp", "vlos", "vturb", "blong"),
+    verbose: bool = True,
+):
+    """
+    Compute fixed (vmin, vmax) for each of the 10 panels using streaming min/max
+    to avoid loading everything at once.
+    Returns a dict panel_name -> (vmin, vmax)
+    """
+    limits = {}
+
+    # ---- FITS limits (2 panels) ----
+    with fits.open(fits_path, memmap=True) as hdul:
+        data = hdul[0].data  # expected (t, s, y, x, w)
+        if data.ndim != 5:
+            raise ValueError(f"Expected FITS data ndim=5, got {data.ndim} with shape {data.shape}")
+        nt = data.shape[0]
+        if verbose:
+            print(f"[limits] FITS shape: {data.shape}, nt={nt}")
+
+        for widx in widx_list:
+            vmin = vmax = None
+            for t in range(nt):
+                frame = data[t, stokes_index, :, :, widx]
+                vmin, vmax = _finite_minmax_update(vmin, vmax, frame)
+            limits[f"I_widx_{widx}"] = (vmin, vmax)
+
+    # ---- Atmosphere limits (8 panels) ----
+    with h5py.File(atmos_h5_path, "r") as f:
+        # determine nt from one key
+        any_key = keys[0]
+        if any_key not in f:
+            raise KeyError(f"Atmos file missing key '{any_key}'")
+        nt = f[any_key].shape[0]
+        if verbose:
+            print(f"[limits] Atmos nt={nt}, keys={keys}")
+
+        for key in keys:
+            if key not in f:
+                raise KeyError(f"Atmos file missing key '{key}'")
+            dset = f[key]
+            if dset.ndim != 4:
+                raise ValueError(f"Expected atmos key '{key}' ndim=4 (t,y,x,ltau), got {dset.ndim} shape={dset.shape}")
+
+            for ltau_val, ltau_idx in tau_indices.items():
+                vmin = vmax = None
+                for t in range(nt):
+                    frame = dset[t, :, :, ltau_idx]
+                    vmin, vmax = _finite_minmax_update(vmin, vmax, frame)
+                limits[f"{key}_ltau_{ltau_val}"] = (vmin, vmax)
+
+    # sanity
+    if len(limits) != 10:
+        raise RuntimeError(f"Expected 10 panel limits, got {len(limits)}: {list(limits.keys())}")
+
+    return limits
+
+
+def make_event_animation_mp4(
+    fits_path: str,
+    atmos_h5_path: str,
+    output_mp4: str = "event_animation.mp4",
+    fps: int = 10,
+    stokes_index: int = 0,
+    wavelengths_angs: tuple[float, float] = (8542.09, 8542.09 + 6.0),
+    logtau_values: tuple[float, float] = (-4.0, -1.0),
+    figsize: tuple[float, float] = (14, 18),
+    dpi: int = 150,
+    cmap: str = "gray",
+    verbose: bool = True,
+):
+    """
+    Generate an MP4 animation (FFmpeg required).
+
+    Notes:
+    - FITS assumed: (time, stokes, Y, X, wavelength)
+    - Atmos assumed: temp/vlos/vturb/blong (time, Y, X, Nlogtau), ltau500 (Nlogtau,)
+    - All values are unitless floats (as per your note).
+    """
+    if fps <= 0:
+        raise ValueError("fps must be > 0")
+
+    # --- wavelength indices for FITS ---
+    wave = _wave_ca_8542(1000)
+    widx1 = _nearest_index(wave, wavelengths_angs[0])
+    widx2 = _nearest_index(wave, wavelengths_angs[1])
+    if verbose:
+        print(f"[wave] target {wavelengths_angs[0]:.3f} Å -> idx {widx1}, actual {wave[widx1]:.6f} Å")
+        print(f"[wave] target {wavelengths_angs[1]:.3f} Å -> idx {widx2}, actual {wave[widx2]:.6f} Å")
+
+    # --- logtau indices for atmos ---
+    with h5py.File(atmos_h5_path, "r") as f:
+        if "ltau500" not in f:
+            raise KeyError("Atmos file missing key 'ltau500'")
+        ltau500 = np.array(f["ltau500"][:], dtype=float)
+
+    tau_idx = {ltv: _nearest_index(ltau500, ltv) for ltv in logtau_values}
+    if verbose:
+        for ltv in logtau_values:
+            idx = tau_idx[ltv]
+            print(f"[ltau] target {ltv:.2f} -> idx {idx}, actual {ltau500[idx]:.6f}")
+
+    # --- fixed color limits for all 10 panels (streaming min/max) ---
+    limits = _compute_panel_limits(
+        fits_path=fits_path,
+        atmos_h5_path=atmos_h5_path,
+        stokes_index=stokes_index,
+        widx_list=[widx1, widx2],
+        tau_indices=tau_idx,
+        verbose=verbose,
+    )
+
+    # --- open data sources for frame-by-frame reading ---
+    hdul = fits.open(fits_path, memmap=True)
+    cube = hdul[0].data
+    if cube.ndim != 5:
+        hdul.close()
+        raise ValueError(f"Expected FITS cube ndim=5, got {cube.ndim} shape={cube.shape}")
+
+    nt_fits = cube.shape[0]
+
+    atmos = h5py.File(atmos_h5_path, "r")
+    temp = atmos["temp"]
+    vlos = atmos["vlos"]
+    vturb = atmos["vturb"]
+    blong = atmos["blong"]
+    nt_atm = temp.shape[0]
+
+    nt = min(nt_fits, nt_atm)
+    if verbose and (nt_fits != nt_atm):
+        print(f"[warn] FITS nt={nt_fits} != Atmos nt={nt_atm}. Using nt=min(...)={nt}.")
+
+    # --- figure layout (5 x 2) ---
+    fig, axes = plt.subplots(5, 2, figsize=figsize, constrained_layout=True)
+
+    # Titles per panel
+    titles = [
+        f"I @ {wave[widx1]:.3f} Å",
+        f"I @ {wave[widx2]:.3f} Å",
+        f"temp @ logτ={ltau500[tau_idx[logtau_values[0]]]:.2f}",
+        f"temp @ logτ={ltau500[tau_idx[logtau_values[1]]]:.2f}",
+        f"vlos @ logτ={ltau500[tau_idx[logtau_values[0]]]:.2f}",
+        f"vlos @ logτ={ltau500[tau_idx[logtau_values[1]]]:.2f}",
+        f"vturb @ logτ={ltau500[tau_idx[logtau_values[0]]]:.2f}",
+        f"vturb @ logτ={ltau500[tau_idx[logtau_values[1]]]:.2f}",
+        f"blong @ logτ={ltau500[tau_idx[logtau_values[0]]]:.2f}",
+        f"blong @ logτ={ltau500[tau_idx[logtau_values[1]]]:.2f}",
+    ]
+
+    # Helper to create one imshow + its own colorbar
+    ims = []
+    cbs = []
+
+    def _add_panel(ax, img2d, title, vmin, vmax, cmap_local):
+        im = ax.imshow(img2d, origin="lower", cmap=cmap_local, vmin=vmin, vmax=vmax, interpolation="nearest")
+        ax.set_title(title)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+        return im, cb
+
+    # initial frame (t=0)
+    t0 = 0
+    I1_0 = cube[t0, stokes_index, :, :, widx1]
+    I2_0 = cube[t0, stokes_index, :, :, widx2]
+    tauA = logtau_values[0]
+    tauB = logtau_values[1]
+    ia = tau_idx[tauA]
+    ib = tau_idx[tauB]
+
+    panels0 = [
+        (axes[0, 0], I1_0, titles[0], *limits[f"I_widx_{widx1}"], cmap),
+        (axes[0, 1], I2_0, titles[1], *limits[f"I_widx_{widx2}"], cmap),
+        (axes[1, 0], temp[t0, :, :, ia], titles[2], *limits[f"temp_ltau_{tauA}"], "viridis"),
+        (axes[1, 1], temp[t0, :, :, ib], titles[3], *limits[f"temp_ltau_{tauB}"], "viridis"),
+        (axes[2, 0], vlos[t0, :, :, ia], titles[4], *limits[f"vlos_ltau_{tauA}"], "RdBu_r"),
+        (axes[2, 1], vlos[t0, :, :, ib], titles[5], *limits[f"vlos_ltau_{tauB}"], "RdBu_r"),
+        (axes[3, 0], vturb[t0, :, :, ia], titles[6], *limits[f"vturb_ltau_{tauA}"], "magma"),
+        (axes[3, 1], vturb[t0, :, :, ib], titles[7], *limits[f"vturb_ltau_{tauB}"], "magma"),
+        (axes[4, 0], blong[t0, :, :, ia], titles[8], *limits[f"blong_ltau_{tauA}"], "RdBu_r"),
+        (axes[4, 1], blong[t0, :, :, ib], titles[9], *limits[f"blong_ltau_{tauB}"], "RdBu_r"),
+    ]
+
+    for ax, img, ttl, vmin, vmax, cm in panels0:
+        im, cb = _add_panel(ax, img, ttl, vmin, vmax, cm)
+        ims.append(im)
+        cbs.append(cb)
+
+    suptitle = fig.suptitle(f"t = {t0}/{nt-1}", fontsize=14)
+
+    # --- writer ---
+    # FFmpeg must be installed and available as "ffmpeg" in PATH.
+    writer = FFMpegWriter(fps=fps, metadata={"title": "Spectral + Atmos Time Sequence"}, bitrate=2000)
+
+    outdir = os.path.dirname(os.path.abspath(output_mp4))
+    if outdir and not os.path.exists(outdir):
+        os.makedirs(outdir, exist_ok=True)
+
+    if verbose:
+        print(f"[write] Saving MP4 -> {output_mp4} (fps={fps}, dpi={dpi}, nt={nt})")
+
+    # --- main loop ---
+    with writer.saving(fig, output_mp4, dpi=dpi):
+        for t in range(nt):
+            # update data
+            ims[0].set_data(cube[t, stokes_index, :, :, widx1])
+            ims[1].set_data(cube[t, stokes_index, :, :, widx2])
+
+            ims[2].set_data(temp[t, :, :, ia])
+            ims[3].set_data(temp[t, :, :, ib])
+
+            ims[4].set_data(vlos[t, :, :, ia])
+            ims[5].set_data(vlos[t, :, :, ib])
+
+            ims[6].set_data(vturb[t, :, :, ia])
+            ims[7].set_data(vturb[t, :, :, ib])
+
+            ims[8].set_data(blong[t, :, :, ia])
+            ims[9].set_data(blong[t, :, :, ib])
+
+            suptitle.set_text(f"t = {t}/{nt-1}")
+            writer.grab_frame()
+
+    # cleanup
+    plt.close(fig)
+    atmos.close()
+    hdul.close()
+
+    if verbose:
+        print("[done] Animation saved.")
+
+
 if __name__ == '__main__':
     # make_rps()
     # make_rps_plots()
@@ -2195,19 +2485,19 @@ if __name__ == '__main__':
     #     smooth_b=None
     # )
 
-    atmos_files = [
-        data_path / 'CA_SI_rps_ssf_total_78993_t_7_vlos_7_vturb_4_blong_2_output_atmos_cycle_B_3.nc',
-        data_path / 'CA_SI_rps_sft_total_35579_t_6_vlos_5_vturb_3_blong_2_output_atmos_cycle_B_3.nc',
-        data_path / 'CA_SI_rps_nsf_total_2647_t_9_vlos_7_vturb_4_blong_2_output_atmos_cycle_B_3.nc',
-        data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_blong_2_output_atmos_cycle_B_3.nc'
-    ]
+    # atmos_files = [
+    #     data_path / 'CA_SI_rps_ssf_total_78993_t_7_vlos_7_vturb_4_blong_2_output_atmos_cycle_B_3.nc',
+    #     data_path / 'CA_SI_rps_sft_total_35579_t_6_vlos_5_vturb_3_blong_2_output_atmos_cycle_B_3.nc',
+    #     data_path / 'CA_SI_rps_nsf_total_2647_t_9_vlos_7_vturb_4_blong_2_output_atmos_cycle_B_3.nc',
+    #     data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_blong_2_output_atmos_cycle_B_3.nc'
+    # ]
 
-    profile_files =  [
-        data_path / 'CA_SI_rps_ssf_total_78993_t_7_vlos_7_vturb_4_blong_2_output_profs_cycle_B_3.nc',
-        data_path / 'CA_SI_rps_sft_total_35579_t_6_vlos_5_vturb_3_blong_2_output_profs_cycle_B_3.nc',
-        data_path / 'CA_SI_rps_nsf_total_2647_t_9_vlos_7_vturb_4_blong_2_output_profs_cycle_B_3.nc',
-        data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_blong_2_output_profs_cycle_B_3.nc'
-    ]
+    # profile_files =  [
+    #     data_path / 'CA_SI_rps_ssf_total_78993_t_7_vlos_7_vturb_4_blong_2_output_profs_cycle_B_3.nc',
+    #     data_path / 'CA_SI_rps_sft_total_35579_t_6_vlos_5_vturb_3_blong_2_output_profs_cycle_B_3.nc',
+    #     data_path / 'CA_SI_rps_nsf_total_2647_t_9_vlos_7_vturb_4_blong_2_output_profs_cycle_B_3.nc',
+    #     data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_blong_2_output_profs_cycle_B_3.nc'
+    # ]
 
     output_merged_atmos = data_path / 'combined_output_atmos_cycle_B_3.nc'
 
@@ -2219,8 +2509,22 @@ if __name__ == '__main__':
     #     atmos_files=atmos_files
     # )
 
-    merge_output_profiles(
-        output_file=output_merged_profs,
-        pixel_files=pixel_files,
-        profile_files=profile_files
+    # merge_output_profiles(
+    #     output_file=output_merged_profs,
+    #     pixel_files=pixel_files,
+    #     profile_files=profile_files
+    # )
+
+    # Example usage:
+    # python make_anim.py /path/to/spectra.fits /path/to/atmos.h5 out.mp4 12
+
+    fps = 10
+    output_mp4 = data_path / 'animation.mp4'
+
+    make_event_animation_mp4(
+        fits_path=actual_filepath_ca,
+        atmos_h5_path=output_merged_atmos,
+        output_mp4=output_mp4,
+        fps=fps,
+        stokes_index=0,
     )
