@@ -443,7 +443,7 @@ class SpectroAtmosViewer:
 
 if __name__ == '__main__':
 
-    actual_filepath_ca = base_path / 'spectralveil_corrected_25Apr25ARM2-004.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
+    actual_filepath_ca = base_path / 'spectralveil_corrected_25Apr25ARM2-003.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
 
     output_merged_atmos = data_path / 'combined_output_atmos_cycle_B_3.nc'
 
