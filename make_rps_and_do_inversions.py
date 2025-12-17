@@ -1942,11 +1942,11 @@ if __name__ == '__main__':
 
     # combine_rps_atmos()
 
-    actual_filepath_ca = base_path / 'spectralveil_corrected_25Apr25ARM2-003.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
+    # actual_filepath_ca = base_path / 'spectralveil_corrected_25Apr25ARM2-003.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
 
-    actual_filepath_si = base_path / 'spectralveil_corrected_25Apr25ARM1-003.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
+    # actual_filepath_si = base_path / 'spectralveil_corrected_25Apr25ARM1-003.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
 
-    rps_atmos_filepath = base_path / 'KMeans-Inversions' / 'combined_rps_atmos.nc'
+    # rps_atmos_filepath = base_path / 'KMeans-Inversions' / 'combined_rps_atmos.nc'
 
     # generate_actual_inversion_files_kmeans(
     #     actual_filepath_ca=actual_filepath_ca,
@@ -1984,14 +1984,14 @@ if __name__ == '__main__':
     #     label_keyname='final_labels_1'
     # )
 
-    data_path = base_path / 'KMeans-Inversions' / 'fulldata_inversions'
+    # data_path = base_path / 'KMeans-Inversions' / 'fulldata_inversions'
 
-    pixel_files = [
-        data_path / 'pixel_indices_ssf_total_78993.h5',
-        data_path / 'pixel_indices_sft_total_35579.h5',
-        data_path / 'pixel_indices_nsf_total_2647.h5',
-        data_path / 'pixel_indices_fsf_total_261.h5'
-    ]
+    # pixel_files = [
+    #     data_path / 'pixel_indices_ssf_total_78993.h5',
+    #     data_path / 'pixel_indices_sft_total_35579.h5',
+    #     data_path / 'pixel_indices_nsf_total_2647.h5',
+    #     data_path / 'pixel_indices_fsf_total_261.h5'
+    # ]
 
     # atmos_files = [
     #     data_path / 'CA_SI_rps_ssf_total_78993_t_7_vlos_7_vturb_4_output_atmos.nc',
@@ -2417,9 +2417,9 @@ if __name__ == '__main__':
     #     data_path / 'CA_SI_rps_fsf_total_261_t_0_vlos_0_vturb_0_blong_2_output_profs_cycle_B_2.nc'
     # ]
 
-    output_merged_atmos = data_path / 'combined_output_atmos_cycle_B_2.nc'
+    # output_merged_atmos = data_path / 'combined_output_atmos_cycle_B_2.nc'
 
-    output_merged_profs = data_path / 'combined_output_profs_cycle_B_2.nc'
+    # output_merged_profs = data_path / 'combined_output_profs_cycle_B_2.nc'
 
     # merge_atmospheres(
     #     output_file=output_merged_atmos,
@@ -2499,9 +2499,9 @@ if __name__ == '__main__':
     #     data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_blong_2_output_profs_cycle_B_3.nc'
     # ]
 
-    output_merged_atmos = data_path / 'combined_output_atmos_cycle_B_3.nc'
+    # output_merged_atmos = data_path / 'combined_output_atmos_cycle_B_3.nc'
 
-    output_merged_profs = data_path / 'combined_output_profs_cycle_B_3.nc'
+    # output_merged_profs = data_path / 'combined_output_profs_cycle_B_3.nc'
 
     # merge_atmospheres(
     #     output_file=output_merged_atmos,
@@ -2518,13 +2518,55 @@ if __name__ == '__main__':
     # Example usage:
     # python make_anim.py /path/to/spectra.fits /path/to/atmos.h5 out.mp4 12
 
-    fps = 3
-    output_mp4 = data_path / 'animation.mp4'
+    # fps = 3
+    # output_mp4 = data_path / 'animation.mp4'
 
-    make_event_animation_mp4(
-        fits_path=actual_filepath_ca,
-        atmos_h5_path=output_merged_atmos,
-        output_mp4=output_mp4,
-        fps=fps,
-        stokes_index=0,
+    # make_event_animation_mp4(
+    #     fits_path=actual_filepath_ca,
+    #     atmos_h5_path=output_merged_atmos,
+    #     output_mp4=output_mp4,
+    #     fps=fps,
+    #     stokes_index=0,
+    # )
+
+    actual_filepath_ca = base_path / 'spectralveil_corrected_25Apr25ARM2-004.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
+
+    actual_filepath_si = base_path / 'spectralveil_corrected_25Apr25ARM1-004.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
+
+    rps_atmos_filepath = base_path / 'KMeans-Inversions' / 'combined_rps_atmos.nc'
+
+    generate_actual_inversion_files_kmeans(
+        actual_filepath_ca=actual_filepath_ca,
+        actual_filepath_si=actual_filepath_si,
+        rps_atmos_filepath=rps_atmos_filepath,
+        rps=np.array([1, 11, 12, 16, 17, 22, 25, 27, 28, 29, 31, 32, 34, 36, 41, 42, 48, 49, 51, 52, 54, 56, 57, 60, 61, 62, 63, 64, 65, 67, 68, 69, 71, 72, 77, 80, 85, 86, 87, 88, 89, 90, 92, 97, 98]),
+        rps_name='ssf',
+        label_keyname='final_labels_2'
+    )
+
+    generate_actual_inversion_files_kmeans(
+        actual_filepath_ca=actual_filepath_ca,
+        actual_filepath_si=actual_filepath_si,
+        rps_atmos_filepath=rps_atmos_filepath,
+        rps=np.array([2, 3, 4, 5, 7, 8, 9, 10, 13, 14, 15, 18, 19, 20, 21, 23, 24, 26, 30, 33, 35, 38, 39, 40, 43, 44, 45, 46, 47, 50, 53, 55, 58, 59, 66, 70, 73, 74, 75, 76, 78, 79, 81, 82, 83, 84, 89, 91, 93, 94, 95, 96, 99]),
+        rps_name='sft',
+        label_keyname='final_labels_2'
+    )
+
+    generate_actual_inversion_files_kmeans(
+        actual_filepath_ca=actual_filepath_ca,
+        actual_filepath_si=actual_filepath_si,
+        rps_atmos_filepath=rps_atmos_filepath,
+        rps=np.array([6, 37]),
+        rps_name='nsf',
+        label_keyname='final_labels_2'
+    )
+
+    generate_actual_inversion_files_kmeans(
+        actual_filepath_ca=actual_filepath_ca,
+        actual_filepath_si=actual_filepath_si,
+        rps_atmos_filepath=rps_atmos_filepath,
+        rps=np.array([0]),
+        rps_name='fsf',
+        label_keyname='final_labels_2'
     )
