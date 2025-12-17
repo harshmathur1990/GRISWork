@@ -6,6 +6,7 @@ matplotlib.use("QtAgg")
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider
 from astropy.io import fits
+from pathlib import Path
 
 
 base_path = Path('/mn/stornext/u3/harshm/Documents/Data/GRIS')
