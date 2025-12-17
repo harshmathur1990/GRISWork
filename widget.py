@@ -4,6 +4,11 @@ import matplotlib.pyplot as plt
 from astropy.io import fits
 import ipywidgets as widgets
 from IPython.display import display
+from pathlib import Path
+
+
+base_path = Path('/mn/stornext/u3/harshm/Documents/Data/GRIS')
+data_path = base_path / 'KMeans-Inversions' / 'fulldata_inversions'
 
 # ---------------------------
 # helpers
@@ -436,12 +441,17 @@ class SpectroAtmosViewer:
         self._redraw_pixel_inspector()
 
 
-# ---------------------------
-# usage
-# ---------------------------
-# viewer = SpectroAtmosViewer(
-#     obs_fits_path="observed_cube.fits",
-#     atmos_h5_path="fitted_atmosphere.h5",
-#     fitprof_h5_path="fitted_profiles.h5",
-#     initial_tyx=(0, 0, 0),
-# )
+if __name__ == '__main__':
+
+    actual_filepath_ca = base_path / 'spectralveil_corrected_25Apr25ARM2-004.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
+
+    output_merged_atmos = data_path / 'combined_output_atmos_cycle_B_3.nc'
+
+    output_merged_profs = data_path / 'combined_output_profs_cycle_B_3.nc'
+
+    viewer = SpectroAtmosViewer(
+        obs_fits_path=actual_filepath_ca,
+        atmos_h5_path=output_merged_atmos,
+        fitprof_h5_path=output_merged_profs,
+        initial_tyx=(0, 0, 0),
+    )
