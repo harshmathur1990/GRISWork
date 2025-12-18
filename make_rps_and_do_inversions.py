@@ -2579,17 +2579,17 @@ if __name__ == '__main__':
     ]
 
     atmos_files = [
-        data_path / 'CA_SI_rps_ssf_total_1835_t_7_vlos_7_vturb_4_output_atmos.nc',
-        data_path / 'CA_SI_rps_sft_total_2211_t_6_vlos_5_vturb_3_output_atmos.nc',
-        data_path / 'CA_SI_rps_nsf_total_11_t_9_vlos_7_vturb_4_output_atmos.nc',
-        data_path / 'CA_SI_rps_fsf_total_6_t_5_vlos_7_vturb_4_output_atmos.nc'
+        data_path / 'CA_SI_rps_ssf_total_1835_t_7_vlos_7_vturb_4_output_atmos_cycle_no_B_1.nc',
+        data_path / 'CA_SI_rps_sft_total_2211_t_6_vlos_5_vturb_3_output_atmos_cycle_no_B_1.nc',
+        data_path / 'CA_SI_rps_nsf_total_11_t_9_vlos_7_vturb_4_output_atmos_cycle_no_B_1.nc',
+        data_path / 'CA_SI_rps_fsf_total_6_t_5_vlos_7_vturb_4_output_atmos_cycle_no_B_1.nc'
     ]
 
     profile_files =  [
-        data_path / 'CA_SI_rps_ssf_total_1835_t_7_vlos_7_vturb_4_output_profs.nc',
-        data_path / 'CA_SI_rps_sft_total_2211_t_6_vlos_5_vturb_3_output_profs.nc',
-        data_path / 'CA_SI_rps_nsf_total_11_t_9_vlos_7_vturb_4_output_profs.nc',
-        data_path / 'CA_SI_rps_fsf_total_6_t_5_vlos_7_vturb_4_output_profs.nc'
+        data_path / 'CA_SI_rps_ssf_total_1835_t_7_vlos_7_vturb_4_output_profs_cycle_no_B_1.nc',
+        data_path / 'CA_SI_rps_sft_total_2211_t_6_vlos_5_vturb_3_output_profs_cycle_no_B_1.nc',
+        data_path / 'CA_SI_rps_nsf_total_11_t_9_vlos_7_vturb_4_output_profs_cycle_no_B_1.nc',
+        data_path / 'CA_SI_rps_fsf_total_6_t_5_vlos_7_vturb_4_output_profs_cycle_no_B_1.nc'
     ]
 
     output_merged_atmos = data_path / 'combined_output_004_atmos_no_B_cycle_1.nc'
