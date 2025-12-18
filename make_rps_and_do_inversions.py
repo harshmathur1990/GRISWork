@@ -32,6 +32,8 @@ falc_file = base_path / 'FALC.nc'
 
 rps_plot_write_dir = base_path / 'PCA_RPs_Plots'
 
+data_path = base_path / 'KMeans-Inversions' / 'fulldata_inversions'
+
 
 def get_ltau_scale():
     taumin = -7.8
@@ -1984,8 +1986,6 @@ if __name__ == '__main__':
     #     label_keyname='final_labels_1'
     # )
 
-    # data_path = base_path / 'KMeans-Inversions' / 'fulldata_inversions'
-
     # pixel_files = [
     #     data_path / 'pixel_indices_ssf_total_78993.h5',
     #     data_path / 'pixel_indices_sft_total_35579.h5',
@@ -2535,38 +2535,76 @@ if __name__ == '__main__':
 
     rps_atmos_filepath = base_path / 'KMeans-Inversions' / 'combined_rps_atmos.nc'
 
-    generate_actual_inversion_files_kmeans(
-        actual_filepath_ca=actual_filepath_ca,
-        actual_filepath_si=actual_filepath_si,
-        rps_atmos_filepath=rps_atmos_filepath,
-        rps=np.array([1, 11, 12, 16, 17, 22, 25, 27, 28, 29, 31, 32, 34, 36, 41, 42, 48, 49, 51, 52, 54, 56, 57, 60, 61, 62, 63, 64, 65, 67, 68, 69, 71, 72, 77, 80, 85, 86, 87, 88, 89, 90, 92, 97, 98]),
-        rps_name='ssf',
-        label_keyname='final_labels_2'
+    # generate_actual_inversion_files_kmeans(
+    #     actual_filepath_ca=actual_filepath_ca,
+    #     actual_filepath_si=actual_filepath_si,
+    #     rps_atmos_filepath=rps_atmos_filepath,
+    #     rps=np.array([1, 11, 12, 16, 17, 22, 25, 27, 28, 29, 31, 32, 34, 36, 41, 42, 48, 49, 51, 52, 54, 56, 57, 60, 61, 62, 63, 64, 65, 67, 68, 69, 71, 72, 77, 80, 85, 86, 87, 88, 89, 90, 92, 97, 98]),
+    #     rps_name='ssf',
+    #     label_keyname='final_labels_2'
+    # )
+
+    # generate_actual_inversion_files_kmeans(
+    #     actual_filepath_ca=actual_filepath_ca,
+    #     actual_filepath_si=actual_filepath_si,
+    #     rps_atmos_filepath=rps_atmos_filepath,
+    #     rps=np.array([2, 3, 4, 5, 7, 8, 9, 10, 13, 14, 15, 18, 19, 20, 21, 23, 24, 26, 30, 33, 35, 38, 39, 40, 43, 44, 45, 46, 47, 50, 53, 55, 58, 59, 66, 70, 73, 74, 75, 76, 78, 79, 81, 82, 83, 84, 89, 91, 93, 94, 95, 96, 99]),
+    #     rps_name='sft',
+    #     label_keyname='final_labels_2'
+    # )
+
+    # generate_actual_inversion_files_kmeans(
+    #     actual_filepath_ca=actual_filepath_ca,
+    #     actual_filepath_si=actual_filepath_si,
+    #     rps_atmos_filepath=rps_atmos_filepath,
+    #     rps=np.array([6, 37]),
+    #     rps_name='nsf',
+    #     label_keyname='final_labels_2'
+    # )
+
+    # generate_actual_inversion_files_kmeans(
+    #     actual_filepath_ca=actual_filepath_ca,
+    #     actual_filepath_si=actual_filepath_si,
+    #     rps_atmos_filepath=rps_atmos_filepath,
+    #     rps=np.array([0]),
+    #     rps_name='fsf',
+    #     label_keyname='final_labels_2'
+    # )
+
+    pixel_files = [
+        data_path / 'pixel_indices_ssf_total_1835.h5',
+        data_path / 'pixel_indices_sft_total_32211.h5',
+        data_path / 'pixel_indices_nsf_total_11.h5',
+        data_path / 'pixel_indices_fsf_total_6.h5'
+    ]
+
+    atmos_files = [
+        data_path / 'CA_SI_rps_ssf_total_1835_t_7_vlos_7_vturb_4_output_atmos.nc',
+        data_path / 'CA_SI_rps_sft_total_2211_t_6_vlos_5_vturb_3_output_atmos.nc',
+        data_path / 'CA_SI_rps_nsf_total_11_t_9_vlos_7_vturb_4_output_atmos.nc',
+        data_path / 'CA_SI_rps_fsf_total_6_t_5_vlos_7_vturb_4_output_atmos.nc'
+    ]
+
+    profile_files =  [
+        data_path / 'CA_SI_rps_ssf_total_1835_t_7_vlos_7_vturb_4_output_profs.nc',
+        data_path / 'CA_SI_rps_sft_total_2211_t_6_vlos_5_vturb_3_output_profs.nc',
+        data_path / 'CA_SI_rps_nsf_total_11_t_9_vlos_7_vturb_4_output_profs.nc',
+        data_path / 'CA_SI_rps_fsf_total_6_t_5_vlos_7_vturb_4_output_profs.nc'
+    ]
+
+    output_merged_atmos = data_path / 'combined_output_004_atmos_no_B_cycle_1.nc'
+
+    output_merged_profs = data_path / 'combined_output_004_profs_no_B_cycle_1.nc'
+
+    merge_atmospheres(
+        output_file=output_merged_atmos,
+        pixel_files=pixel_files,
+        atmos_files=atmos_files
     )
 
-    generate_actual_inversion_files_kmeans(
-        actual_filepath_ca=actual_filepath_ca,
-        actual_filepath_si=actual_filepath_si,
-        rps_atmos_filepath=rps_atmos_filepath,
-        rps=np.array([2, 3, 4, 5, 7, 8, 9, 10, 13, 14, 15, 18, 19, 20, 21, 23, 24, 26, 30, 33, 35, 38, 39, 40, 43, 44, 45, 46, 47, 50, 53, 55, 58, 59, 66, 70, 73, 74, 75, 76, 78, 79, 81, 82, 83, 84, 89, 91, 93, 94, 95, 96, 99]),
-        rps_name='sft',
-        label_keyname='final_labels_2'
+    merge_output_profiles(
+        output_file=output_merged_profs,
+        pixel_files=pixel_files,
+        profile_files=profile_files
     )
 
-    generate_actual_inversion_files_kmeans(
-        actual_filepath_ca=actual_filepath_ca,
-        actual_filepath_si=actual_filepath_si,
-        rps_atmos_filepath=rps_atmos_filepath,
-        rps=np.array([6, 37]),
-        rps_name='nsf',
-        label_keyname='final_labels_2'
-    )
-
-    generate_actual_inversion_files_kmeans(
-        actual_filepath_ca=actual_filepath_ca,
-        actual_filepath_si=actual_filepath_si,
-        rps_atmos_filepath=rps_atmos_filepath,
-        rps=np.array([0]),
-        rps_name='fsf',
-        label_keyname='final_labels_2'
-    )
