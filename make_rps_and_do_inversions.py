@@ -2573,7 +2573,7 @@ if __name__ == '__main__':
 
     pixel_files = [
         data_path / 'pixel_indices_ssf_total_1835.h5',
-        data_path / 'pixel_indices_sft_total_32211.h5',
+        data_path / 'pixel_indices_sft_total_2211.h5',
         data_path / 'pixel_indices_nsf_total_11.h5',
         data_path / 'pixel_indices_fsf_total_6.h5'
     ]
