@@ -2599,12 +2599,14 @@ if __name__ == '__main__':
     merge_atmospheres(
         output_file=output_merged_atmos,
         pixel_files=pixel_files,
-        atmos_files=atmos_files
+        atmos_files=atmos_files,
+        label_key_name='final_labels_2'
     )
 
     merge_output_profiles(
         output_file=output_merged_profs,
         pixel_files=pixel_files,
-        profile_files=profile_files
+        profile_files=profile_files,
+        label_key_name='final_labels_2'
     )
 
