@@ -3,7 +3,7 @@ sys.path.insert(1, '/mn/stornext/u3/harshm/Documents/WorkRepo/stic/example')
 import numpy as np
 import h5py
 import netCDF4 as nc
-import sunpy.io
+import sunpy.io._fits
 import matplotlib.pyplot as plt
 from pathlib import Path
 import matplotlib
@@ -53,7 +53,7 @@ def make_rps():
     t1, y1, x1, y2, x2 = 0, 0, 0, 0, 0
 
     for input_file in input_files:
-        data, header = sunpy.io.read_file(input_file)[0]
+        data, header = sunpy.io._fits.read(input_file)[0]
 
         if len(data.shape) == 5:
             data = np.transpose(data, axes=(0, 2, 3, 1, 4))
@@ -118,7 +118,7 @@ def make_si_rps():
     t1, y1, x1, y2, x2 = 0, 0, 0, 0, 0
 
     for input_file in input_files_silicon:
-        data, header = sunpy.io.read_file(input_file)[0]
+        data, header = sunpy.io._fits.read(input_file)[0]
 
         if len(data.shape) == 5:
             data = np.transpose(data, axes=(0, 2, 3, 1, 4))
@@ -235,7 +235,7 @@ def get_data(get_data=True, get_labels=True, get_rps=True, crop_indice=None, cw=
         framerows = None
 
         for input_file in input_files_silicon:
-            data, header = sunpy.io.read_file(input_file)[0]
+            data, header = sunpy.io._fits.read(input_file)[0]
 
             if len(data.shape) == 5:
                 data = np.transpose(data, axes=(0, 2, 3, 4, 1))
@@ -1283,7 +1283,7 @@ def make_observation_object_caller(
     include_b=False
 ):
 
-    data, header = sunpy.io.read_file(actual_filepath)[0]
+    data, header = sunpy.io._fits.read(actual_filepath)[0]
 
     if data.ndim == 5:
         seldata = data[pixel_indices[0], :, pixel_indices[1], pixel_indices[2]]
