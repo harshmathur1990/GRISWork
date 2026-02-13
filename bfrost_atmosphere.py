@@ -112,9 +112,9 @@ for i0 in tqdm(range(0, nx, chunk_size), desc="Processing columns"):
     bz_new   = bz_new.reshape(nxc, ny, ndep_new)
 
     # ---- Write into model ----
-    m.temp[i0:i1, :, :] = temp_new
-    m.vlos[i0:i1, :, :] = vz_new
-    m.Bln[i0:i1, :, :]  = bz_new
+    m.temp[0, i0:i1, :, :] = temp_new
+    m.vlos[0, i0:i1, :, :] = vz_new
+    m.Bln[0, i0:i1, :, :]  = bz_new
 
 # ------------------------------------------------------------
 # Write output
