@@ -82,21 +82,29 @@ for i0 in tqdm(range(0, nx, chunk_size), desc="Processing columns"):
     bz_old   = np.take_along_axis(bz_old, sort_idx, axis=1)
 
     # ---- Interpolation ----
-    idx = np.searchsorted(ltau_old, ltau_new[None, :], side='left')
-    idx = np.clip(idx, 1, ndep_old-1)
+    temp_new = np.empty((ncol, ndep_new))
+    vz_new   = np.empty((ncol, ndep_new))
+    bz_new   = np.empty((ncol, ndep_new))
 
-    x0 = np.take_along_axis(ltau_old, idx-1, axis=1)
-    x1 = np.take_along_axis(ltau_old, idx, axis=1)
-    w = (ltau_new[None, :] - x0) / (x1 - x0)
+    for k in range(ndep_new):
 
-    def interp_field(field_old):
-        y0 = np.take_along_axis(field_old, idx-1, axis=1)
-        y1 = np.take_along_axis(field_old, idx, axis=1)
-        return y0 + w * (y1 - y0)
+        tau_val = ltau_new[k]
 
-    temp_new = interp_field(temp_old)
-    vz_new   = interp_field(vz_old)
-    bz_new   = interp_field(bz_old)
+        idx = np.sum(ltau_old < tau_val, axis=1)
+        idx = np.clip(idx, 1, ndep_old - 1)
+
+        x0 = ltau_old[np.arange(ncol), idx - 1]
+        x1 = ltau_old[np.arange(ncol), idx]
+
+        w = (tau_val - x0) / (x1 - x0)
+
+        for field_old, field_new in zip(
+            (temp_old, vz_old, bz_old),
+            (temp_new, vz_new, bz_new)
+        ):
+            y0 = field_old[np.arange(ncol), idx - 1]
+            y1 = field_old[np.arange(ncol), idx]
+            field_new[:, k] = y0 + w * (y1 - y0)
 
     # ---- Reshape back ----
     temp_new = temp_new.reshape(nxc, ny, ndep_new)
