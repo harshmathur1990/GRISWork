@@ -62,7 +62,7 @@ for i0 in tqdm(range(0, nx, chunk_size), desc="Processing columns"):
     bz_old   = bz_ds[0, i0:i1, :, :ndep_old]
 
     # ---- Unit conversions ----
-    vz_old *= 1e-3     # m/s -> km/s
+    vz_old *= 1e2    # m/s -> cm/s
     bz_old *= 1e4      # Tesla -> Gauss
 
     nxc = i1 - i0
