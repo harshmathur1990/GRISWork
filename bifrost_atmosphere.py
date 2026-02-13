@@ -108,6 +108,7 @@ for i0 in tqdm(range(0, nx, chunk_size), desc="Processing columns"):
 
     # ---- Reshape back ----
     temp_new = temp_new.reshape(nxc, ny, ndep_new)
+    temp_new = np.clip(temp_new, None, 25000.0)
     vz_new   = vz_new.reshape(nxc, ny, ndep_new)
     bz_new   = bz_new.reshape(nxc, ny, ndep_new)
 
