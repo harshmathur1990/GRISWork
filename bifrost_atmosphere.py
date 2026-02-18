@@ -110,7 +110,9 @@ for i0 in tqdm(range(0, nx, chunk_size), desc="Processing columns"):
     temp_new = temp_new.reshape(nxc, ny, ndep_new)
     temp_new = np.clip(temp_new, None, 12000.0)
     vz_new   = vz_new.reshape(nxc, ny, ndep_new)
+    vz_new = np.clip(vz_new, -10e5, 10e5)
     bz_new   = bz_new.reshape(nxc, ny, ndep_new)
+    bz_new = np.clip(bz_new, -2000, 2000)
 
     # ---- Write into model ----
     m.temp[0, i0:i1, :, :] = temp_new
