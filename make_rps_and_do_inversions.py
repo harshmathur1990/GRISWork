@@ -1682,96 +1682,75 @@ def _finite_minmax_update(vmin, vmax, a: np.ndarray):
     return vmin, vmax
 
 
-def _compute_panel_limits(
-    fits_path: str,
-    atmos_h5_path: str,
-    synth_h5_path: str,
-    stokes_index: int,
-    widx_list: list[int],
-    synth_widx_list: list[int],
-    tau_indices: dict[float, int],
-    keys=("temp", "vlos", "vturb", "blong"),
-    verbose: bool = True,
+def _compute_row_limits(
+    fits_path,
+    atmos_h5_path,
+    synth_h5_path,
+    stokes_index,
+    widx_list,
+    synth_widx_list,
+    tau_indices,
+    keys=("temp","vlos","vturb","blong"),
+    verbose=True,
 ):
-    """
-    Compute fixed (vmin, vmax) for each of the 12 panels using streaming min/max
-    to avoid loading everything at once.
-    Returns a dict panel_name -> (vmin, vmax)
-    """
     limits = {}
 
-    # ---- FITS limits (2 panels) ----
+    # --------------------------------------------------
+    # 1) INTENSITY (observed + synthetic together)
+    # --------------------------------------------------
+    vmin = vmax = None
+
     with fits.open(fits_path, memmap=True) as hdul:
-        data = hdul[0].data  # expected (t, s, y, x, w)
-        if data.ndim != 5:
-            raise ValueError(f"Expected FITS data ndim=5, got {data.ndim} with shape {data.shape}")
+        data = hdul[0].data
         nt = data.shape[0]
-        if verbose:
-            print(f"[limits] FITS shape: {data.shape}, nt={nt}")
 
         for widx in widx_list:
-            vmin = vmax = None
             for t in range(nt):
                 frame = data[t, stokes_index, :, :, widx]
                 vmin, vmax = _finite_minmax_update(vmin, vmax, frame)
-            limits[f"I_widx_{widx}"] = (vmin, vmax)
 
-    # ---- Synthetic limits (2 panels) ----
-    with h5py.File(synth_h5_path, "r") as f:
-        prof = f["profiles"]  # (t,y,x,wave,stokes)
+    with h5py.File(synth_h5_path,"r") as f:
+        prof = f["profiles"]
         nt = prof.shape[0]
 
-        if verbose:
-            print(f"[limits] Synth shape: {prof.shape}")
-
         for widx in synth_widx_list:
-            vmin = vmax = None
             for t in range(nt):
-                frame = prof[t, :, :, widx, stokes_index]
+                frame = prof[t,:,:,widx,stokes_index]
                 vmin, vmax = _finite_minmax_update(vmin, vmax, frame)
-            limits[f"SYN_widx_{widx}"] = (vmin, vmax)
 
-    # ---- Atmosphere limits (8 panels) ----
-    with h5py.File(atmos_h5_path, "r") as f:
-        # determine nt from one key
-        any_key = keys[0]
-        if any_key not in f:
-            raise KeyError(f"Atmos file missing key '{any_key}'")
-        nt = f[any_key].shape[0]
-        if verbose:
-            print(f"[limits] Atmos nt={nt}, keys={keys}")
+    limits["intensity"] = (vmin, vmax)
+
+    # --------------------------------------------------
+    # 2) ATMOSPHERE (one range per variable)
+    # --------------------------------------------------
+    with h5py.File(atmos_h5_path,"r") as f:
 
         for key in keys:
-            if key not in f:
-                raise KeyError(f"Atmos file missing key '{key}'")
+            vmin = vmax = None
             dset = f[key]
-            if dset.ndim != 4:
-                raise ValueError(f"Expected atmos key '{key}' ndim=4 (t,y,x,ltau), got {dset.ndim} shape={dset.shape}")
+            nt = dset.shape[0]
 
-            for ltau_val, ltau_idx in tau_indices.items():
-                vmin = vmax = None
-                # for t in range(nt):
-                #     frame = dset[t, :, :, ltau_idx]
-                #     vmin, vmax = _finite_minmax_update(vmin, vmax, frame)
+            for ltau_idx in tau_indices.values():
                 for t in range(nt):
-                    frame = dset[t, :, :, ltau_idx]
 
-                    # ---- apply display scaling ----
-                    if key == "temp":
-                        frame = frame * TEMP_SCALE
-                    elif key == "vlos":
-                        frame = frame * VLOS_SCALE
-                    elif key == "vturb":
-                        frame = frame * VTURB_SCALE
-                    elif key == "blong":
-                        frame = frame * BLONG_SCALE
+                    frame = dset[t,:,:,ltau_idx]
+
+                    # scaling
+                    if key=="temp":
+                        frame *= TEMP_SCALE
+                    elif key=="vlos":
+                        frame *= VLOS_SCALE
+                    elif key=="vturb":
+                        frame *= VTURB_SCALE
+                    elif key=="blong":
+                        frame *= BLONG_SCALE
 
                     vmin, vmax = _finite_minmax_update(vmin, vmax, frame)
-                limits[f"{key}_ltau_{ltau_val}"] = (vmin, vmax)
 
-    # sanity
-    if len(limits) != 12:
-        raise RuntimeError(f"Expected 12 panel limits, got {len(limits)}: {list(limits.keys())}")
+            limits[key] = (vmin, vmax)
+
+    if verbose:
+        print("[limits]", limits)
 
     return limits
 
@@ -1835,7 +1814,7 @@ def make_event_animation_mp4(
             print(f"[ltau] target {ltv:.2f} -> idx {idx}, actual {ltau500[idx]:.6f}")
 
     # --- fixed color limits for all 10 panels (streaming min/max) ---
-    limits = _compute_panel_limits(
+    limits = _compute_row_limits(
         fits_path=fits_path,
         atmos_h5_path=atmos_h5_path,
         synth_h5_path=synth_h5_path,        # NEW
@@ -1918,12 +1897,17 @@ def make_event_animation_mp4(
     ims = []
     cbs = []
 
-    def _add_panel(ax, img2d, title, vmin, vmax, cmap_local):
-        im = ax.imshow(img2d, origin="lower", cmap=cmap_local, vmin=vmin, vmax=vmax, interpolation="nearest")
+    def _add_panel(ax, img2d, title, vmin, vmax, cmap_local, add_colorbar=False):
+        im = ax.imshow(img2d, origin="lower", cmap=cmap_local,
+                       vmin=vmin, vmax=vmax, interpolation="nearest")
         ax.set_title(title)
         ax.set_xticks([])
         ax.set_yticks([])
-        cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+
+        cb = None
+        if add_colorbar:
+            cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+
         return im, cb
 
     # initial frame (t=0)
@@ -1938,29 +1922,37 @@ def make_event_animation_mp4(
     ib = tau_idx[tauB]
 
     panels0 = [
-        (axes[0, 0], I1_0, titles[0], *limits[f"I_widx_{widx1}"], cmap),
-        (axes[0, 1], I2_0, titles[1], *limits[f"I_widx_{widx2}"], cmap),
+        # INTENSITY (shared)
+        (axes[0,0], I1_0, titles[0], *limits["intensity"], cmap),
+        (axes[0,1], I2_0, titles[1], *limits["intensity"], cmap),
 
-        (axes[1, 0], S1_0, titles[2], *limits[f"SYN_widx_{swidx1}"], cmap),
-        (axes[1, 1], S2_0, titles[3], *limits[f"SYN_widx_{swidx2}"], cmap),
+        (axes[1,0], S1_0, titles[2], *limits["intensity"], cmap),
+        (axes[1,1], S2_0, titles[3], *limits["intensity"], cmap),
 
-        (axes[2, 0], temp[t0, :, :, ia] * TEMP_SCALE,  titles[2], *limits[f"temp_ltau_{tauA}"], "viridis"),
-        (axes[2, 1], temp[t0, :, :, ib] * TEMP_SCALE,  titles[3], *limits[f"temp_ltau_{tauB}"], "viridis"),
+        # TEMP (shared)
+        (axes[2,0], temp[t0,:,:,ia]*TEMP_SCALE, titles[4], *limits["temp"], "viridis"),
+        (axes[2,1], temp[t0,:,:,ib]*TEMP_SCALE, titles[5], *limits["temp"], "viridis"),
 
-        (axes[3, 0], vlos[t0, :, :, ia] * VLOS_SCALE,  titles[4], *limits[f"vlos_ltau_{tauA}"], "RdBu_r"),
-        (axes[3, 1], vlos[t0, :, :, ib] * VLOS_SCALE,  titles[5], *limits[f"vlos_ltau_{tauB}"], "RdBu_r"),
+        # VLOS
+        (axes[3,0], vlos[t0,:,:,ia]*VLOS_SCALE, titles[6], *limits["vlos"], "RdBu_r"),
+        (axes[3,1], vlos[t0,:,:,ib]*VLOS_SCALE, titles[7], *limits["vlos"], "RdBu_r"),
 
-        (axes[4, 0], vturb[t0, :, :, ia] * VTURB_SCALE, titles[6], *limits[f"vturb_ltau_{tauA}"], "magma"),
-        (axes[4, 1], vturb[t0, :, :, ib] * VTURB_SCALE, titles[7], *limits[f"vturb_ltau_{tauB}"], "magma"),
+        # VTURB
+        (axes[4,0], vturb[t0,:,:,ia]*VTURB_SCALE, titles[8], *limits["vturb"], "magma"),
+        (axes[4,1], vturb[t0,:,:,ib]*VTURB_SCALE, titles[9], *limits["vturb"], "magma"),
 
-        (axes[5, 0], blong[t0, :, :, ia] * BLONG_SCALE, titles[8], *limits[f"blong_ltau_{tauA}"], "RdBu_r"),
-        (axes[5, 1], blong[t0, :, :, ib] * BLONG_SCALE, titles[9], *limits[f"blong_ltau_{tauB}"], "RdBu_r"),
+        # BLONG
+        (axes[5,0], blong[t0,:,:,ia]*BLONG_SCALE, titles[10], *limits["blong"], "RdBu_r"),
+        (axes[5,1], blong[t0,:,:,ib]*BLONG_SCALE, titles[11], *limits["blong"], "RdBu_r"),
     ]
 
-    for ax, img, ttl, vmin, vmax, cm in panels0:
-        im, cb = _add_panel(ax, img, ttl, vmin, vmax, cm)
+    row_has_cb = [True, False, True, True, True, True]
+
+    for i,(ax,img,ttl,vmin,vmax,cm) in enumerate(panels0):
+        row = i//2
+        add_cb = row_has_cb[row] and (i%2==0)
+        im, cb = _add_panel(ax,img,ttl,vmin,vmax,cm,add_cb)
         ims.append(im)
-        cbs.append(cb)
 
     suptitle = fig.suptitle(f"t = {t0}/{nt-1}", fontsize=14)
 
