@@ -1640,6 +1640,8 @@ Each subplot has its own fixed colorbar (vmin/vmax do not change with time).
 import os
 import numpy as np
 import h5py
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.animation import FFMpegWriter
 
@@ -1764,8 +1766,8 @@ def make_event_animation_mp4(
     stokes_index: int = 0,
     wavelengths_angs: tuple[float, float] = (8542.09, 8542.09 + 6.0),
     logtau_values: tuple[float, float] = (-4.0, -1.0),
-    figsize: tuple[float, float] = (14, 18),
-    dpi: int = 600,
+    figsize: tuple[float, float] = (12, 8),
+    dpi: int = 320,
     cmap: str = "gray",
     verbose: bool = True,
 ):
