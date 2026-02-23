@@ -2623,7 +2623,7 @@ if __name__ == '__main__':
     make_event_animation_mp4(
         fits_path=actual_filepath_ca,
         atmos_h5_path=output_merged_atmos,
-        synth_profiles=output_merged_profs,
+        synth_h5_path=output_merged_profs,
         output_mp4=output_mp4,
         fps=fps,
         stokes_index=0,
