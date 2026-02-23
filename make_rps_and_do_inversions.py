@@ -1647,6 +1647,14 @@ from matplotlib.animation import FFMpegWriter
 from astropy.io import fits
 
 
+# --------------------------------------------------
+# Display scaling factors (convert to nicer units)
+# --------------------------------------------------
+TEMP_SCALE  = 1e-3   # K  -> kK
+VLOS_SCALE  = 1e-5   # cm/s -> km/s
+VTURB_SCALE = 1e-5   # cm/s -> km/s
+BLONG_SCALE = 1.0    # Gauss stays Gauss
+
 def _wave_ca_8542(nwave: int = 1000) -> np.ndarray:
     """Wavelength array given by the user."""
     return np.arange(nwave, dtype=float) * 0.0109907 + 8540.67304823
@@ -1677,14 +1685,16 @@ def _finite_minmax_update(vmin, vmax, a: np.ndarray):
 def _compute_panel_limits(
     fits_path: str,
     atmos_h5_path: str,
+    synth_h5_path: str,
     stokes_index: int,
     widx_list: list[int],
+    synth_widx_list: list[int],
     tau_indices: dict[float, int],
     keys=("temp", "vlos", "vturb", "blong"),
     verbose: bool = True,
 ):
     """
-    Compute fixed (vmin, vmax) for each of the 10 panels using streaming min/max
+    Compute fixed (vmin, vmax) for each of the 12 panels using streaming min/max
     to avoid loading everything at once.
     Returns a dict panel_name -> (vmin, vmax)
     """
@@ -1706,6 +1716,21 @@ def _compute_panel_limits(
                 vmin, vmax = _finite_minmax_update(vmin, vmax, frame)
             limits[f"I_widx_{widx}"] = (vmin, vmax)
 
+    # ---- Synthetic limits (2 panels) ----
+    with h5py.File(synth_h5_path, "r") as f:
+        prof = f["profiles"]  # (t,y,x,wave,stokes)
+        nt = prof.shape[0]
+
+        if verbose:
+            print(f"[limits] Synth shape: {prof.shape}")
+
+        for widx in synth_widx_list:
+            vmin = vmax = None
+            for t in range(nt):
+                frame = prof[t, :, :, widx, stokes_index]
+                vmin, vmax = _finite_minmax_update(vmin, vmax, frame)
+            limits[f"SYN_widx_{widx}"] = (vmin, vmax)
+
     # ---- Atmosphere limits (8 panels) ----
     with h5py.File(atmos_h5_path, "r") as f:
         # determine nt from one key
@@ -1725,14 +1750,28 @@ def _compute_panel_limits(
 
             for ltau_val, ltau_idx in tau_indices.items():
                 vmin = vmax = None
+                # for t in range(nt):
+                #     frame = dset[t, :, :, ltau_idx]
+                #     vmin, vmax = _finite_minmax_update(vmin, vmax, frame)
                 for t in range(nt):
                     frame = dset[t, :, :, ltau_idx]
+
+                    # ---- apply display scaling ----
+                    if key == "temp":
+                        frame = frame * TEMP_SCALE
+                    elif key == "vlos":
+                        frame = frame * VLOS_SCALE
+                    elif key == "vturb":
+                        frame = frame * VTURB_SCALE
+                    elif key == "blong":
+                        frame = frame * BLONG_SCALE
+
                     vmin, vmax = _finite_minmax_update(vmin, vmax, frame)
                 limits[f"{key}_ltau_{ltau_val}"] = (vmin, vmax)
 
     # sanity
-    if len(limits) != 10:
-        raise RuntimeError(f"Expected 10 panel limits, got {len(limits)}: {list(limits.keys())}")
+    if len(limits) != 12:
+        raise RuntimeError(f"Expected 12 panel limits, got {len(limits)}: {list(limits.keys())}")
 
     return limits
 
@@ -1740,6 +1779,7 @@ def _compute_panel_limits(
 def make_event_animation_mp4(
     fits_path: str,
     atmos_h5_path: str,
+    synth_h5_path: str,
     output_mp4: str = "event_animation.mp4",
     fps: int = 10,
     stokes_index: int = 0,
@@ -1769,6 +1809,19 @@ def make_event_animation_mp4(
         print(f"[wave] target {wavelengths_angs[0]:.3f} Å -> idx {widx1}, actual {wave[widx1]:.6f} Å")
         print(f"[wave] target {wavelengths_angs[1]:.3f} Å -> idx {widx2}, actual {wave[widx2]:.6f} Å")
 
+    # --- synthetic wavelength indices ---
+    with h5py.File(synth_h5_path, "r") as f:
+        if "wav" not in f or "profiles" not in f:
+            raise KeyError("Synthetic file must contain 'wav' and 'profiles'")
+        synth_wave = np.array(f["wav"][:], dtype=float)
+
+    swidx1 = _nearest_index(synth_wave, wavelengths_angs[0])
+    swidx2 = _nearest_index(synth_wave, wavelengths_angs[1])
+
+    if verbose:
+        print(f"[synth wave] {wavelengths_angs[0]:.3f} Å -> idx {swidx1}, actual {synth_wave[swidx1]:.6f}")
+        print(f"[synth wave] {wavelengths_angs[1]:.3f} Å -> idx {swidx2}, actual {synth_wave[swidx2]:.6f}")
+
     # --- logtau indices for atmos ---
     with h5py.File(atmos_h5_path, "r") as f:
         if "ltau500" not in f:
@@ -1785,13 +1838,15 @@ def make_event_animation_mp4(
     limits = _compute_panel_limits(
         fits_path=fits_path,
         atmos_h5_path=atmos_h5_path,
+        synth_h5_path=synth_h5_path,        # NEW
         stokes_index=stokes_index,
         widx_list=[widx1, widx2],
+        synth_widx_list=[swidx1, swidx2],   # NEW
         tau_indices=tau_idx,
         verbose=verbose,
     )
 
-    # --- open data sources for frame-by-frame reading ---
+    # --- open observed FITS cube ---
     hdul = fits.open(fits_path, memmap=True)
     cube = hdul[0].data
     if cube.ndim != 5:
@@ -1800,32 +1855,63 @@ def make_event_animation_mp4(
 
     nt_fits = cube.shape[0]
 
+
+    # --- open atmosphere cube ---
     atmos = h5py.File(atmos_h5_path, "r")
-    temp = atmos["temp"]
-    vlos = atmos["vlos"]
+    temp  = atmos["temp"]
+    vlos  = atmos["vlos"]
     vturb = atmos["vturb"]
     blong = atmos["blong"]
     nt_atm = temp.shape[0]
 
-    nt = min(nt_fits, nt_atm)
-    if verbose and (nt_fits != nt_atm):
-        print(f"[warn] FITS nt={nt_fits} != Atmos nt={nt_atm}. Using nt=min(...)={nt}.")
+
+    # --- open synthetic cube (NEW) ---
+    synth = h5py.File(synth_h5_path, "r")
+    if "profiles" not in synth:
+        raise KeyError("Synthetic HDF5 must contain dataset 'profiles'")
+
+    synth_profiles = synth["profiles"]   # shape: (t, y, x, wave, stokes)
+
+    if synth_profiles.ndim != 5:
+        raise ValueError(
+            f"Expected synth profiles ndim=5, got {synth_profiles.ndim} "
+            f"shape={synth_profiles.shape}"
+        )
+
+    nt_syn = synth_profiles.shape[0]
+
+
+    # --- final common time length ---
+    nt = min(nt_fits, nt_atm, nt_syn)
+
+    if verbose and (nt != nt_fits or nt != nt_atm or nt != nt_syn):
+        print(
+            f"[warn] time mismatch: "
+            f"FITS={nt_fits}, ATM={nt_atm}, SYN={nt_syn} → using nt={nt}"
+        )
 
     # --- figure layout (5 x 2) ---
-    fig, axes = plt.subplots(5, 2, figsize=figsize, constrained_layout=True)
+    fig, axes = plt.subplots(6, 2, figsize=figsize, constrained_layout=True)
 
     # Titles per panel
     titles = [
-        f"I @ {wave[widx1]:.3f} Å",
-        f"I @ {wave[widx2]:.3f} Å",
-        f"temp @ logτ={ltau500[tau_idx[logtau_values[0]]]:.2f}",
-        f"temp @ logτ={ltau500[tau_idx[logtau_values[1]]]:.2f}",
-        f"vlos @ logτ={ltau500[tau_idx[logtau_values[0]]]:.2f}",
-        f"vlos @ logτ={ltau500[tau_idx[logtau_values[1]]]:.2f}",
-        f"vturb @ logτ={ltau500[tau_idx[logtau_values[0]]]:.2f}",
-        f"vturb @ logτ={ltau500[tau_idx[logtau_values[1]]]:.2f}",
-        f"blong @ logτ={ltau500[tau_idx[logtau_values[0]]]:.2f}",
-        f"blong @ logτ={ltau500[tau_idx[logtau_values[1]]]:.2f}",
+        f"I_obs @ {wave[widx1]:.3f} Å",
+        f"I_obs @ {wave[widx2]:.3f} Å",
+
+        f"I_syn @ {synth_wave[swidx1]:.3f} Å",
+        f"I_syn @ {synth_wave[swidx2]:.3f} Å",
+
+        f"Temp [kK] @ logτ={ltau500[tau_idx[logtau_values[0]]]:.2f}",
+        f"Temp [kK] @ logτ={ltau500[tau_idx[logtau_values[1]]]:.2f}",
+
+        f"Vlos [km/s] @ logτ={ltau500[tau_idx[logtau_values[0]]]:.2f}",
+        f"Vlos [km/s] @ logτ={ltau500[tau_idx[logtau_values[1]]]:.2f}",
+
+        f"Vturb [km/s] @ logτ={ltau500[tau_idx[logtau_values[0]]]:.2f}",
+        f"Vturb [km/s] @ logτ={ltau500[tau_idx[logtau_values[1]]]:.2f}",
+
+        f"Blong [G] @ logτ={ltau500[tau_idx[logtau_values[0]]]:.2f}",
+        f"Blong [G] @ logτ={ltau500[tau_idx[logtau_values[1]]]:.2f}",
     ]
 
     # Helper to create one imshow + its own colorbar
@@ -1844,6 +1930,8 @@ def make_event_animation_mp4(
     t0 = 0
     I1_0 = cube[t0, stokes_index, :, :, widx1]
     I2_0 = cube[t0, stokes_index, :, :, widx2]
+    S1_0 = synth_profiles[t0, :, :, swidx1, stokes_index]
+    S2_0 = synth_profiles[t0, :, :, swidx2, stokes_index]
     tauA = logtau_values[0]
     tauB = logtau_values[1]
     ia = tau_idx[tauA]
@@ -1852,14 +1940,21 @@ def make_event_animation_mp4(
     panels0 = [
         (axes[0, 0], I1_0, titles[0], *limits[f"I_widx_{widx1}"], cmap),
         (axes[0, 1], I2_0, titles[1], *limits[f"I_widx_{widx2}"], cmap),
-        (axes[1, 0], temp[t0, :, :, ia], titles[2], *limits[f"temp_ltau_{tauA}"], "viridis"),
-        (axes[1, 1], temp[t0, :, :, ib], titles[3], *limits[f"temp_ltau_{tauB}"], "viridis"),
-        (axes[2, 0], vlos[t0, :, :, ia], titles[4], *limits[f"vlos_ltau_{tauA}"], "RdBu_r"),
-        (axes[2, 1], vlos[t0, :, :, ib], titles[5], *limits[f"vlos_ltau_{tauB}"], "RdBu_r"),
-        (axes[3, 0], vturb[t0, :, :, ia], titles[6], *limits[f"vturb_ltau_{tauA}"], "magma"),
-        (axes[3, 1], vturb[t0, :, :, ib], titles[7], *limits[f"vturb_ltau_{tauB}"], "magma"),
-        (axes[4, 0], blong[t0, :, :, ia], titles[8], *limits[f"blong_ltau_{tauA}"], "RdBu_r"),
-        (axes[4, 1], blong[t0, :, :, ib], titles[9], *limits[f"blong_ltau_{tauB}"], "RdBu_r"),
+
+        (axes[1, 0], S1_0, titles[2], *limits[f"SYN_widx_{swidx1}"], cmap),
+        (axes[1, 1], S2_0, titles[3], *limits[f"SYN_widx_{swidx2}"], cmap),
+
+        (axes[2, 0], temp[t0, :, :, ia] * TEMP_SCALE,  titles[2], *limits[f"temp_ltau_{tauA}"], "viridis"),
+        (axes[2, 1], temp[t0, :, :, ib] * TEMP_SCALE,  titles[3], *limits[f"temp_ltau_{tauB}"], "viridis"),
+
+        (axes[3, 0], vlos[t0, :, :, ia] * VLOS_SCALE,  titles[4], *limits[f"vlos_ltau_{tauA}"], "RdBu_r"),
+        (axes[3, 1], vlos[t0, :, :, ib] * VLOS_SCALE,  titles[5], *limits[f"vlos_ltau_{tauB}"], "RdBu_r"),
+
+        (axes[4, 0], vturb[t0, :, :, ia] * VTURB_SCALE, titles[6], *limits[f"vturb_ltau_{tauA}"], "magma"),
+        (axes[4, 1], vturb[t0, :, :, ib] * VTURB_SCALE, titles[7], *limits[f"vturb_ltau_{tauB}"], "magma"),
+
+        (axes[5, 0], blong[t0, :, :, ia] * BLONG_SCALE, titles[8], *limits[f"blong_ltau_{tauA}"], "RdBu_r"),
+        (axes[5, 1], blong[t0, :, :, ib] * BLONG_SCALE, titles[9], *limits[f"blong_ltau_{tauB}"], "RdBu_r"),
     ]
 
     for ax, img, ttl, vmin, vmax, cm in panels0:
@@ -1887,17 +1982,20 @@ def make_event_animation_mp4(
             ims[0].set_data(cube[t, stokes_index, :, :, widx1])
             ims[1].set_data(cube[t, stokes_index, :, :, widx2])
 
-            ims[2].set_data(temp[t, :, :, ia])
-            ims[3].set_data(temp[t, :, :, ib])
+            ims[2].set_data(synth_profiles[t, :, :, swidx1, stokes_index])
+            ims[3].set_data(synth_profiles[t, :, :, swidx2, stokes_index])
 
-            ims[4].set_data(vlos[t, :, :, ia])
-            ims[5].set_data(vlos[t, :, :, ib])
+            ims[4].set_data(temp[t, :, :, ia] * TEMP_SCALE)
+            ims[5].set_data(temp[t, :, :, ib] * TEMP_SCALE)
 
-            ims[6].set_data(vturb[t, :, :, ia])
-            ims[7].set_data(vturb[t, :, :, ib])
+            ims[6].set_data(vlos[t, :, :, ia] * VLOS_SCALE)
+            ims[7].set_data(vlos[t, :, :, ib] * VLOS_SCALE)
 
-            ims[8].set_data(blong[t, :, :, ia])
-            ims[9].set_data(blong[t, :, :, ib])
+            ims[8].set_data(vturb[t, :, :, ia] * VTURB_SCALE)
+            ims[9].set_data(vturb[t, :, :, ib] * VTURB_SCALE)
+
+            ims[10].set_data(blong[t, :, :, ia] * BLONG_SCALE)
+            ims[11].set_data(blong[t, :, :, ib] * BLONG_SCALE)
 
             suptitle.set_text(f"t = {t}/{nt-1}")
             writer.grab_frame()
@@ -1906,6 +2004,7 @@ def make_event_animation_mp4(
     plt.close(fig)
     atmos.close()
     hdul.close()
+    synth.close()
 
     if verbose:
         print("[done] Animation saved.")
@@ -1986,12 +2085,12 @@ if __name__ == '__main__':
     #     label_keyname='final_labels_1'
     # )
 
-    pixel_files = [
-        data_path / 'pixel_indices_ssf_total_78993.h5',
-        data_path / 'pixel_indices_sft_total_35579.h5',
-        data_path / 'pixel_indices_nsf_total_2647.h5',
-        data_path / 'pixel_indices_fsf_total_261.h5'
-    ]
+    # pixel_files = [
+    #     data_path / 'pixel_indices_ssf_total_78993.h5',
+    #     data_path / 'pixel_indices_sft_total_35579.h5',
+    #     data_path / 'pixel_indices_nsf_total_2647.h5',
+    #     data_path / 'pixel_indices_fsf_total_261.h5'
+    # ]
 
     # atmos_files = [
     #     data_path / 'CA_SI_rps_ssf_total_78993_t_7_vlos_7_vturb_4_output_atmos.nc',
@@ -2499,9 +2598,9 @@ if __name__ == '__main__':
     #     data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_blong_2_output_profs_cycle_B_3.nc'
     # ]
 
-    # output_merged_atmos = data_path / 'combined_output_atmos_cycle_B_3.nc'
+    output_merged_atmos = data_path / 'combined_output_atmos_cycle_B_3.nc'
 
-    # output_merged_profs = data_path / 'combined_output_profs_cycle_B_3.nc'
+    output_merged_profs = data_path / 'combined_output_profs_cycle_B_3.nc'
 
     # merge_atmospheres(
     #     output_file=output_merged_atmos,
@@ -2518,16 +2617,17 @@ if __name__ == '__main__':
     # Example usage:
     # python make_anim.py /path/to/spectra.fits /path/to/atmos.h5 out.mp4 12
 
-    # fps = 3
-    # output_mp4 = data_path / 'animation.mp4'
+    fps = 3
+    output_mp4 = data_path / 'animation.mp4'
 
-    # make_event_animation_mp4(
-    #     fits_path=actual_filepath_ca,
-    #     atmos_h5_path=output_merged_atmos,
-    #     output_mp4=output_mp4,
-    #     fps=fps,
-    #     stokes_index=0,
-    # )
+    make_event_animation_mp4(
+        fits_path=actual_filepath_ca,
+        atmos_h5_path=output_merged_atmos,
+        synth_profiles=output_merged_profs,
+        output_mp4=output_mp4,
+        fps=fps,
+        stokes_index=0,
+    )
 
     # actual_filepath_ca = base_path / 'spectralveil_corrected_25Apr25ARM2-004.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
 
@@ -2750,32 +2850,32 @@ if __name__ == '__main__':
     #     smooth_b=None
     # )
 
-    atmos_files = [
-        data_path / 'CA_SI_rps_ssf_total_78993_t_6_vlos_7_vturb_4_blong_2_output_atmos_cycle_B_n_1.nc',
-        data_path / 'CA_SI_rps_sft_total_35579_t_6_vlos_5_vturb_3_blong_2_output_atmos_cycle_B_n_1.nc',
-        data_path / 'CA_SI_rps_nsf_total_2647_t_8_vlos_7_vturb_4_blong_2_output_atmos_cycle_B_n_1.nc',
-        data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_blong_2_output_atmos_cycle_B_n_1.nc'
-    ]
+    # atmos_files = [
+    #     data_path / 'CA_SI_rps_ssf_total_78993_t_6_vlos_7_vturb_4_blong_2_output_atmos_cycle_B_n_1.nc',
+    #     data_path / 'CA_SI_rps_sft_total_35579_t_6_vlos_5_vturb_3_blong_2_output_atmos_cycle_B_n_1.nc',
+    #     data_path / 'CA_SI_rps_nsf_total_2647_t_8_vlos_7_vturb_4_blong_2_output_atmos_cycle_B_n_1.nc',
+    #     data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_blong_2_output_atmos_cycle_B_n_1.nc'
+    # ]
 
-    profile_files =  [
-        data_path / 'CA_SI_rps_ssf_total_78993_t_6_vlos_7_vturb_4_blong_2_output_profs_cycle_B_n_1.nc',
-        data_path / 'CA_SI_rps_sft_total_35579_t_6_vlos_5_vturb_3_blong_2_output_profs_cycle_B_n_1.nc',
-        data_path / 'CA_SI_rps_nsf_total_2647_t_8_vlos_7_vturb_4_blong_2_output_profs_cycle_B_n_1.nc',
-        data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_blong_2_output_profs_cycle_B_n_1.nc'
-    ]
+    # profile_files =  [
+    #     data_path / 'CA_SI_rps_ssf_total_78993_t_6_vlos_7_vturb_4_blong_2_output_profs_cycle_B_n_1.nc',
+    #     data_path / 'CA_SI_rps_sft_total_35579_t_6_vlos_5_vturb_3_blong_2_output_profs_cycle_B_n_1.nc',
+    #     data_path / 'CA_SI_rps_nsf_total_2647_t_8_vlos_7_vturb_4_blong_2_output_profs_cycle_B_n_1.nc',
+    #     data_path / 'CA_SI_rps_fsf_total_261_t_5_vlos_7_vturb_4_blong_2_output_profs_cycle_B_n_1.nc'
+    # ]
 
-    output_merged_atmos = data_path / 'combined_output_atmos_cycle_B_n_1.nc'
+    # output_merged_atmos = data_path / 'combined_output_atmos_cycle_B_n_1.nc'
 
-    output_merged_profs = data_path / 'combined_output_profs_cycle_B_n_1.nc'
+    # output_merged_profs = data_path / 'combined_output_profs_cycle_B_n_1.nc'
 
-    merge_atmospheres(
-        output_file=output_merged_atmos,
-        pixel_files=pixel_files,
-        atmos_files=atmos_files
-    )
+    # merge_atmospheres(
+    #     output_file=output_merged_atmos,
+    #     pixel_files=pixel_files,
+    #     atmos_files=atmos_files
+    # )
 
-    merge_output_profiles(
-        output_file=output_merged_profs,
-        pixel_files=pixel_files,
-        profile_files=profile_files
-    )
+    # merge_output_profiles(
+    #     output_file=output_merged_profs,
+    #     pixel_files=pixel_files,
+    #     profile_files=profile_files
+    # )
