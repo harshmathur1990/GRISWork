@@ -1766,7 +1766,7 @@ def make_event_animation_mp4(
     stokes_index: int = 0,
     wavelengths_angs: tuple[float, float] = (8542.09, 8542.09 + 6.0),
     logtau_values: tuple[float, float] = (-4.0, -1.0),
-    figsize: tuple[float, float] = (12, 8),
+    figsize: tuple[float, float] = (14, 18),
     dpi: int = 320,
     cmap: str = "gray",
     verbose: bool = True,
