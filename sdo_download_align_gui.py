@@ -142,6 +142,7 @@ class Product:
     series: str
     wavelength: int | None = None
     native_cadence: int = 45
+    segment: str | None = None
     note: str = ""
 
 
@@ -155,6 +156,7 @@ def _aia_product(wavelength: int, series: str, cadence: int, note: str = "") -> 
         series=series,
         wavelength=wavelength,
         native_cadence=cadence,
+        segment="image",
         note=note,
     )
 
@@ -293,6 +295,10 @@ def download_product(
     ]
     if product.wavelength is not None:
         query_attrs.append(a.Wavelength(product.wavelength * u.AA))
+    if product.segment is not None:
+        # AIA Level 1 also exposes a ``spikes`` segment containing cosmic-ray
+        # detections.  Only the intensity image is suitable for registration.
+        query_attrs.append(a.jsoc.Segment(product.segment))
 
     log(
         f"Searching {product.series} from {start.isoformat(sep=' ')} to "
@@ -339,6 +345,14 @@ def align_product(
     """Align all relevant raw files for one product."""
 
     sources = index_fits(raw_root / product.raw_subdir)
+    if product.instrument == "AIA":
+        ignored = [source for source in sources if ".spikes." in source.path.name.lower()]
+        sources = [source for source in sources if ".spikes." not in source.path.name.lower()]
+        if ignored:
+            log(
+                f"Ignoring {len(ignored)} AIA spikes-segment file(s); only "
+                "intensity images will be aligned."
+            )
     matches = match_nearest(references, sources, max_delta_seconds)
     output_dir = aligned_root / product.aligned_subdir
     output_dir.mkdir(parents=True, exist_ok=True)
