@@ -14,7 +14,11 @@ Run with the same Python environment that contains SunPy and aiapy::
 from __future__ import annotations
 
 import argparse
+import contextlib
+import logging
+import re
 import sys
+import time
 import traceback
 from dataclasses import dataclass
 from datetime import timedelta
@@ -30,6 +34,100 @@ from align_sdo_from_hmi_continuum import (
 
 
 Log = Callable[[str], None]
+
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+class GuiTextStream:
+    """Line-buffered stdout/stderr adapter for a GUI logging callback.
+
+    TQDM/Parfive progress bars use carriage returns instead of newlines.  Those
+    updates are throttled to keep the GUI event queue responsive during large
+    downloads.
+    """
+
+    encoding = "utf-8"
+
+    def __init__(self, emit: Log) -> None:
+        self.emit = emit
+        self.buffer = ""
+        self.last_progress_emit = 0.0
+
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+        clean = ANSI_ESCAPE_RE.sub("", str(text))
+
+        if "\r" in clean and "\n" not in clean:
+            progress = clean.replace("\r", "").strip()
+            now = time.monotonic()
+            if progress and (now - self.last_progress_emit >= 1.0 or "100%" in progress):
+                self.emit(progress)
+                self.last_progress_emit = now
+            return len(text)
+
+        self.buffer += clean.replace("\r", "\n")
+        while "\n" in self.buffer:
+            line, self.buffer = self.buffer.split("\n", 1)
+            if line.strip():
+                self.emit(line.rstrip())
+        return len(text)
+
+    def flush(self) -> None:
+        if self.buffer.strip():
+            self.emit(self.buffer.rstrip())
+        self.buffer = ""
+
+    def isatty(self) -> bool:
+        return False
+
+
+class GuiLoggingHandler(logging.Handler):
+    """Forward standard-library log records to the GUI callback."""
+
+    def __init__(self, emit: Log) -> None:
+        super().__init__()
+        self.callback = emit
+        self.setFormatter(
+            logging.Formatter("%(asctime)s - %(name)s - %(levelname)s: %(message)s")
+        )
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.callback(self.format(record))
+        except Exception:
+            self.handleError(record)
+
+
+@contextlib.contextmanager
+def route_console_output_to_gui(emit: Log) -> Any:
+    """Temporarily route logs and console progress output into the GUI."""
+
+    stream = GuiTextStream(emit)
+    handler = GuiLoggingHandler(emit)
+    loggers = [
+        logging.getLogger(),
+        logging.getLogger("drms"),
+        logging.getLogger("sunpy"),
+        logging.getLogger("parfive"),
+    ]
+    saved = [(logger, list(logger.handlers), logger.propagate) for logger in loggers]
+
+    # Replace console handlers while the worker owns the pipeline.  Named
+    # loggers do not propagate here, avoiding duplicate records at the root.
+    for position, logger in enumerate(loggers):
+        logger.handlers = [handler]
+        if position:
+            logger.propagate = False
+
+    try:
+        with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
+            yield
+    finally:
+        stream.flush()
+        for logger, handlers, propagate in saved:
+            logger.handlers = handlers
+            logger.propagate = propagate
 
 
 @dataclass(frozen=True)
@@ -359,7 +457,13 @@ def launch_gui(args: argparse.Namespace) -> int:
         @Slot()
         def run(self) -> None:
             try:
-                run_pipeline(*self.pipeline_args, log=self.log_message.emit)
+                # Import SunPy/DRMS first because they configure their logging
+                # handlers during import.  Replacing handlers after that makes
+                # sure their staging messages go to the GUI rather than the
+                # launching terminal.
+                load_download_dependencies()
+                with route_console_output_to_gui(self.log_message.emit):
+                    run_pipeline(*self.pipeline_args, log=self.log_message.emit)
             except Exception as exc:
                 self.log_message.emit("\nERROR\n" + traceback.format_exc())
                 self.completed.emit(False, str(exc))
@@ -373,6 +477,7 @@ def launch_gui(args: argparse.Namespace) -> int:
             self.resize(980, 780)
             self.thread: Any = None
             self.worker: Any = None
+            self.job_running = False
             self.product_boxes: dict[str, Any] = {}
 
             central = QtWidgets.QWidget()
@@ -504,6 +609,7 @@ def launch_gui(args: argparse.Namespace) -> int:
             self.log_text.clear()
             self.start_button.setEnabled(False)
             self.status_label.setText("Working… JSOC staging can take several minutes.")
+            self.job_running = True
             self.thread = QtCore.QThread(self)
             self.worker = PipelineWorker(pipeline_args)
             self.worker.moveToThread(self.thread)
@@ -512,6 +618,7 @@ def launch_gui(args: argparse.Namespace) -> int:
             self.worker.completed.connect(self._finished)
             self.worker.completed.connect(self.thread.quit)
             self.thread.finished.connect(self.worker.deleteLater)
+            self.thread.finished.connect(self._thread_stopped)
             self.thread.finished.connect(self.thread.deleteLater)
             self.thread.start()
 
@@ -521,7 +628,6 @@ def launch_gui(args: argparse.Namespace) -> int:
 
         @Slot(bool, str)
         def _finished(self, success: bool, message: str) -> None:
-            self.start_button.setEnabled(True)
             if success:
                 self.status_label.setText(message)
                 QtWidgets.QMessageBox.information(self, "Complete", message)
@@ -530,6 +636,27 @@ def launch_gui(args: argparse.Namespace) -> int:
                 QtWidgets.QMessageBox.critical(
                     self, "Download/alignment failed", message
                 )
+
+        @Slot()
+        def _thread_stopped(self) -> None:
+            self.job_running = False
+            self.start_button.setEnabled(True)
+            self.worker = None
+            self.thread = None
+
+        def closeEvent(self, event: Any) -> None:
+            if self.job_running:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Download still running",
+                    "The JSOC download/alignment job is still running. Closing "
+                    "the window now would terminate its worker thread and can "
+                    "corrupt partial downloads. Please wait for completion; you "
+                    "can minimize the window in the meantime.",
+                )
+                event.ignore()
+                return
+            event.accept()
 
     application = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     window = DownloadAlignWindow()
