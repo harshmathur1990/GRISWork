@@ -16,10 +16,12 @@ from __future__ import annotations
 import argparse
 import contextlib
 import logging
+import os
 import re
 import sys
 import time
 import traceback
+import warnings
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -30,6 +32,7 @@ from align_sdo_from_hmi_continuum import (
     align_one,
     index_fits,
     match_nearest,
+    nominal_time_from_name,
 )
 
 
@@ -261,6 +264,135 @@ def response_record_count(response: Any) -> int:
         return len(response)
 
 
+def fits_validation_error(path: Path) -> str | None:
+    """Return an explanation if *path* is not a complete readable FITS file.
+
+    This checks every HDU boundary against the actual file size without loading
+    the multi-megapixel image arrays into memory.
+    """
+
+    try:
+        from astropy.io import fits
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with fits.open(
+                path,
+                mode="readonly",
+                memmap=True,
+                lazy_load_hdus=False,
+            ) as hdus:
+                if not hdus:
+                    return "file contains no HDUs"
+                hdus.verify("exception")
+                file_size = os.path.getsize(path)
+                has_image = False
+                for index, hdu in enumerate(hdus):
+                    if int(hdu.header.get("NAXIS", 0)) >= 2:
+                        has_image = True
+                    info = hdus.fileinfo(index)
+                    if info is None:
+                        continue
+                    data_start = info.get("datLoc")
+                    data_span = info.get("datSpan")
+                    if data_start is not None and data_span is not None:
+                        expected_end = int(data_start) + int(data_span)
+                        if file_size < expected_end:
+                            return (
+                                f"truncated at {file_size} bytes; HDU {index} "
+                                f"requires at least {expected_end} bytes"
+                            )
+                if not has_image:
+                    return "file contains no two-dimensional image HDU"
+
+            warning_text = " | ".join(str(item.message) for item in caught)
+            if "truncated" in warning_text.lower():
+                return warning_text
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+
+    return None
+
+
+def product_fits_files(product: Product, directory: Path) -> list[Path]:
+    """Return local FITS candidates belonging to the requested image product."""
+
+    paths = sorted(directory.glob("*.fits"))
+    if product.instrument == "AIA":
+        paths = [path for path in paths if ".spikes." not in path.name.lower()]
+    return paths
+
+
+def response_nominal_times(response: Any) -> set[Any]:
+    """Extract nominal record clocks from a SunPy/JSOC response."""
+
+    times: set[Any] = set()
+    preferred_columns = (
+        "T_REC",
+        "T_OBS",
+        "Start Time",
+        "Start time",
+        "start_time",
+    )
+    for block in response:
+        column_names = list(getattr(block, "colnames", []))
+        column = next((name for name in preferred_columns if name in column_names), None)
+        if column is None:
+            continue
+        for value in block[column]:
+            try:
+                times.add(nominal_time_from_name(Path(str(value))))
+            except ValueError:
+                continue
+    return times
+
+
+def quarantine_file(path: Path, problem: str, log: Log) -> Path:
+    """Move one invalid file aside without overwriting earlier quarantines."""
+
+    candidate = path.with_name(path.name + ".invalid")
+    suffix = 1
+    while candidate.exists():
+        candidate = path.with_name(path.name + f".invalid.{suffix}")
+        suffix += 1
+    path.replace(candidate)
+    log(
+        f"Moved invalid/incomplete download aside: {path.name} -> "
+        f"{candidate.name} ({problem})"
+    )
+    return candidate
+
+
+def assess_local_product(
+    product: Product,
+    destination: Path,
+    expected_times: set[Any],
+    log: Log,
+) -> tuple[list[Path], set[Any], list[Path]]:
+    """Validate local records that appear in the current JSOC response."""
+
+    healthy_paths: list[Path] = []
+    healthy_times: set[Any] = set()
+    invalid_paths: list[Path] = []
+
+    for path in product_fits_files(product, destination):
+        try:
+            nominal_time = nominal_time_from_name(path)
+        except ValueError:
+            continue
+        if expected_times and nominal_time not in expected_times:
+            continue
+
+        problem = fits_validation_error(path)
+        if problem is not None:
+            invalid_paths.append(quarantine_file(path, problem, log))
+            continue
+        healthy_paths.append(path)
+        healthy_times.add(nominal_time)
+
+    return healthy_paths, healthy_times, invalid_paths
+
+
 def download_product(
     product: Product,
     references: Sequence[TimedFile],
@@ -310,7 +442,30 @@ def download_product(
         raise RuntimeError(
             f"JSOC returned no records for {product.label}. {product.note}".strip()
         )
-    log(f"JSOC returned {count} record(s); staging/downloading to {destination}")
+    expected_times = response_nominal_times(response)
+    healthy_paths, healthy_times, invalid_before_fetch = assess_local_product(
+        product, destination, expected_times, log
+    )
+
+    if expected_times:
+        missing_times = expected_times - healthy_times
+        log(
+            f"JSOC returned {count} record(s). Local check: "
+            f"{len(healthy_times)} healthy, {len(invalid_before_fetch)} invalid, "
+            f"{len(missing_times)} missing."
+        )
+        if not missing_times and not overwrite:
+            log("Every requested record is already available and healthy; download skipped.")
+            return healthy_paths
+    else:
+        # This is a compatibility fallback for an unexpected response table
+        # schema. Fido/Parfive will still skip existing destination files.
+        log(
+            f"JSOC returned {count} record(s), but their timestamps could not "
+            "be read from the response; checking during fetch."
+        )
+
+    log(f"Staging/downloading missing records to {destination}")
 
     downloaded = Fido.fetch(
         response,
@@ -327,6 +482,47 @@ def download_product(
         raise RuntimeError(
             f"{len(errors)} download(s) failed for {product.label}: {details}"
         )
+
+    # An interrupted network transfer can leave a partial file with its final
+    # ``.fits`` name.  Quarantine it and run the same fetch once more; with
+    # overwrite disabled, Parfive reuses all complete files and retrieves only
+    # the now-missing records.
+    _, downloaded_times, invalid = assess_local_product(
+        product, destination, expected_times, log
+    )
+    missing_after_fetch = expected_times - downloaded_times if expected_times else set()
+    if invalid or missing_after_fetch:
+        log(
+            f"Refetching {len(invalid)} invalid and "
+            f"{len(missing_after_fetch)} missing FITS file(s)..."
+        )
+        repaired = Fido.fetch(
+            response,
+            path=str(destination / "{file}"),
+            overwrite=False,
+        )
+        repair_errors = list(getattr(repaired, "errors", []))
+        if repair_errors:
+            details = "; ".join(str(error) for error in repair_errors[:3])
+            raise RuntimeError(
+                f"Repair download failed for {product.label}: {details}"
+            )
+        _, repaired_times, still_invalid = assess_local_product(
+            product, destination, expected_times, log
+        )
+        if still_invalid:
+            raise RuntimeError(
+                f"{len(still_invalid)} {product.label} FITS file(s) remained "
+                "invalid after a second download attempt."
+            )
+
+        if expected_times:
+            still_missing = expected_times - repaired_times
+            if still_missing:
+                raise RuntimeError(
+                    f"{len(still_missing)} {product.label} record(s) are still "
+                    "missing after the repair download."
+                )
 
     paths = [Path(str(path)) for path in downloaded]
     log(f"Download finished ({len(paths)} fetched or reused file(s)).")
