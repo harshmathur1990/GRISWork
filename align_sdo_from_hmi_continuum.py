@@ -148,22 +148,45 @@ def _load_dependencies() -> tuple[Any, Any, Any, Any]:
 
     try:
         import numpy as np
-        import sunpy.map
-        from aiapy.calibrate import register
+    except ImportError as exc:
+        raise RuntimeError(
+            f"Could not import numpy: {exc}. Install it into the Python "
+            f"environment running this script ({sys.executable})."
+        ) from exc
+
+    try:
         from astropy.io import fits
     except ImportError as exc:
         raise RuntimeError(
-            "This script requires numpy, astropy, sunpy, aiapy, and reproject "
-            "(SunPy uses reproject in Map.reproject_to)."
+            f"Could not import astropy.io.fits: {exc}. Install astropy into "
+            f"the Python environment running this script ({sys.executable})."
+        ) from exc
+
+    try:
+        import sunpy.map
+    except ImportError as exc:
+        raise RuntimeError(
+            f"Could not import sunpy.map: {exc}. Install SunPy (including its "
+            f"map dependencies) into {sys.executable}."
+        ) from exc
+
+    try:
+        from aiapy.calibrate import register
+    except ImportError as exc:
+        raise RuntimeError(
+            f"Could not import aiapy.calibrate.register: {exc}. Install aiapy "
+            f"into {sys.executable}."
         ) from exc
 
     # Give a clear error up front instead of failing after the first large map
-    # has been read.
+    # has been read.  SunPy imports without this optional reprojection package,
+    # but Map.reproject_to needs it at runtime.
     try:
         import reproject  # noqa: F401
     except ImportError as exc:
         raise RuntimeError(
-            "The 'reproject' package is required by SunPy Map.reproject_to."
+            f"Could not import reproject: {exc}. Install reproject into the "
+            f"Python environment running this script ({sys.executable})."
         ) from exc
 
     return np, sunpy.map, register, fits
