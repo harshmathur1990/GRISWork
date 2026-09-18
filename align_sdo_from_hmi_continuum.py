@@ -45,8 +45,20 @@ CHANNELS = ("HMI/Magnetogram", "AIA/171", "AIA/1600")
 # nominal clock, rather than converting TAI to UTC.  alignment_GUI_HMI.py uses
 # exactly this convention when it associates HMI images with ground frames.
 HMI_TIME_RE = re.compile(r"\.(?P<date>\d{8})_(?P<time>\d{6})_TAI\.")
+HMI_FIDO_TIME_RE = re.compile(
+    r"(?P<year>\d{4})[._-](?P<month>\d{2})[._-](?P<day>\d{2})[_T]"
+    r"(?P<hour>\d{2})[:_]?(?P<minute>\d{2})[:_]?(?P<second>\d{2})_TAI",
+    re.IGNORECASE,
+)
 AIA_TIME_RE = re.compile(
     r"\.(?P<date>\d{4}-\d{2}-\d{2})T(?P<time>\d{6})Z\."
+)
+# VSO/Fido can return names such as
+# ``aia.lev1.304A_2020_01_01T00_00_00.64Z.image_lev1.fits`` instead of the
+# JSOC-style name used by the original downloads.
+AIA_FIDO_TIME_RE = re.compile(
+    r"(?P<year>\d{4})[-_](?P<month>\d{2})[-_](?P<day>\d{2})T"
+    r"(?P<hour>\d{2})[_:]?(?P<minute>\d{2})[_:]?(?P<second>\d{2})"
 )
 
 
@@ -79,10 +91,34 @@ def nominal_time_from_name(path: Path) -> datetime:
         value = hmi_match.group("date") + hmi_match.group("time")
         return datetime.strptime(value, "%Y%m%d%H%M%S")
 
+    hmi_fido_match = HMI_FIDO_TIME_RE.search(path.name)
+    if hmi_fido_match:
+        values = {key: int(value) for key, value in hmi_fido_match.groupdict().items()}
+        return datetime(
+            values["year"],
+            values["month"],
+            values["day"],
+            values["hour"],
+            values["minute"],
+            values["second"],
+        )
+
     aia_match = AIA_TIME_RE.search(path.name)
     if aia_match:
         value = aia_match.group("date") + aia_match.group("time")
         return datetime.strptime(value, "%Y-%m-%d%H%M%S")
+
+    aia_fido_match = AIA_FIDO_TIME_RE.search(path.name)
+    if aia_fido_match:
+        values = {key: int(value) for key, value in aia_fido_match.groupdict().items()}
+        return datetime(
+            values["year"],
+            values["month"],
+            values["day"],
+            values["hour"],
+            values["minute"],
+            values["second"],
+        )
 
     raise ValueError(f"Cannot extract an SDO time from filename: {path.name}")
 
