@@ -2,8 +2,9 @@
 """GUI for downloading selected SDO channels and aligning them to HMI.
 
 The time range and target WCS grids are taken from the FITS files already in
-``aligned_SDO/HMI/Continuum``.  Raw data are downloaded from JSOC through
-SunPy/Fido and then reprojected with the functions in
+``aligned_SDO/HMI/Continuum``.  Raw AIA data are requested with explicit DRMS
+record-set queries, HMI data are requested through SunPy/Fido, and both are
+then reprojected with the functions in
 ``align_sdo_from_hmi_continuum.py``.
 
 Run with the same Python environment that contains SunPy and aiapy::
@@ -444,6 +445,196 @@ def assess_local_product(
     return healthy_paths, healthy_times, invalid_paths
 
 
+def build_aia_drms_recordset(
+    product: Product,
+    references: Sequence[TimedFile],
+    sample_seconds: int,
+) -> str:
+    """Build the explicit JSOC record-set query required for AIA exports.
+
+    The observing sequence is rounded to its nominal duration and surrounded by
+    a 5-minute leading and 10-minute trailing margin.  For the current 20-minute
+    sequence this produces exactly ``09:03:00Z/35m@48s``.
+    """
+
+    if product.instrument != "AIA" or product.wavelength is None:
+        raise ValueError("An AIA product with a wavelength is required")
+    query_start = (references[0].time - timedelta(minutes=5)).replace(
+        second=0, microsecond=0
+    )
+    observation_minutes = max(
+        1,
+        round((references[-1].time - references[0].time).total_seconds() / 60),
+    )
+    duration_minutes = observation_minutes + 15
+    return (
+        f"{product.series}[{query_start:%Y-%m-%dT%H:%M:%S}Z/"
+        f"{duration_minutes}m@{sample_seconds}s]"
+        f"[{product.wavelength}]{{image}}"
+    )
+
+
+def download_aia_with_drms(
+    product: Product,
+    references: Sequence[TimedFile],
+    raw_root: Path,
+    email: str,
+    sample_seconds: int,
+    log: Log,
+) -> list[Path]:
+    """Stage an explicit AIA DRMS export and download only missing files."""
+
+    try:
+        import drms
+    except ImportError as exc:
+        raise RuntimeError(f"Could not import drms: {exc}") from exc
+
+    destination = raw_root / product.raw_subdir
+    destination.mkdir(parents=True, exist_ok=True)
+    recordset = build_aia_drms_recordset(product, references, sample_seconds)
+    observation_start = references[0].time.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    observation_end = references[-1].time.replace(
+        hour=23, minute=59, second=59, microsecond=999999
+    )
+
+    log(f"DRMS RECORDSET QUERY: {recordset}")
+    log(
+        "DRMS EXPORT PARAMETERS: method='url', protocol='fits', "
+        f"destination={str(destination)!r}"
+    )
+    client = drms.Client(email=email)
+    request = client.export(
+        recordset,
+        method="url",
+        protocol="fits",
+        email=email,
+    )
+    log(
+        f"DRMS EXPORT SUBMITTED: id={request.id!r}, initial_status={request.status}"
+    )
+    if not request.wait(sleep=10):
+        raise RuntimeError(
+            f"DRMS export did not complete successfully: id={request.id!r}, "
+            f"status={request.status}"
+        )
+    log(
+        f"DRMS EXPORT FINISHED: id={request.id!r}, status={request.status}, "
+        f"request_url={request.request_url!r}"
+    )
+
+    urls = request.urls
+    if urls is None or len(urls) == 0:
+        healthy_paths, healthy_times, invalid = assess_local_product(
+            product,
+            destination,
+            observation_start,
+            observation_end,
+            log,
+            verbose=True,
+        )
+        estimated_count = max(
+            1,
+            round(
+                (
+                    (references[-1].time - references[0].time).total_seconds()
+                    + 15 * 60
+                )
+                / sample_seconds
+            ),
+        )
+        log(
+            f"DRMS EMPTY EXPORT: local_healthy={len(healthy_times)}, "
+            f"local_invalid={len(invalid)}, estimated_required={estimated_count}"
+        )
+        if len(healthy_times) >= estimated_count:
+            log("Local AIA inventory is complete; download skipped.")
+            return healthy_paths
+        raise RuntimeError(
+            f"DRMS returned no export URLs for {recordset}, and the local "
+            "inventory is incomplete."
+        )
+
+    log(f"DRMS EXPORT FILE COUNT: {len(urls)}")
+    healthy_paths, healthy_times, _ = assess_local_product(
+        product,
+        destination,
+        observation_start,
+        observation_end,
+        log,
+        verbose=True,
+    )
+    healthy_by_time = {
+        nominal_time_from_name(path): path for path in healthy_paths
+    }
+    missing_indices: list[int] = []
+
+    for ordinal, (index, row) in enumerate(urls.iterrows(), start=1):
+        remote_filename = Path(str(row.get("filename", ""))).name
+        remote_record = str(row.get("record", ""))
+        remote_url = str(row.get("url", ""))
+        local_path = destination / remote_filename if remote_filename else None
+        local_ok = local_path is not None and local_path.exists()
+        local_reason = "exact exported filename exists"
+
+        if local_ok:
+            problem = fits_validation_error(local_path)
+            if problem is not None:
+                quarantine_file(local_path, problem, log)
+                local_ok = False
+                local_reason = f"exact filename was invalid: {problem}"
+        else:
+            try:
+                record_time = nominal_time_from_name(Path(remote_record))
+            except ValueError:
+                record_time = None
+            if record_time is not None and record_time in healthy_by_time:
+                local_ok = True
+                local_path = healthy_by_time[record_time]
+                local_reason = "healthy local timestamp match"
+            else:
+                local_reason = "no healthy exact-name or timestamp match"
+
+        log(
+            f"DRMS FILE [{ordinal:03d}/{len(urls):03d}]: index={index!r}, "
+            f"record={remote_record!r}, filename={remote_filename!r}, "
+            f"local_ok={local_ok}, local_path={str(local_path) if local_path else None!r}, "
+            f"decision={local_reason!r}, url={remote_url!r}"
+        )
+        if not local_ok:
+            missing_indices.append(index)
+
+    if not missing_indices:
+        log("All DRMS export files are already present and healthy; download skipped.")
+        return healthy_paths
+
+    log(
+        f"DRMS DOWNLOAD PLAN: downloading {len(missing_indices)} of {len(urls)} "
+        f"exported file(s), indices={missing_indices!r}"
+    )
+    result = request.download(
+        str(destination),
+        index=missing_indices,
+        timeout=120,
+    )
+    log("DRMS DOWNLOAD RESULT:\n" + str(result))
+
+    final_paths, _, invalid_after = assess_local_product(
+        product,
+        destination,
+        observation_start,
+        observation_end,
+        log,
+        verbose=True,
+    )
+    if invalid_after:
+        raise RuntimeError(
+            f"{len(invalid_after)} AIA file(s) were invalid after DRMS download."
+        )
+    return final_paths
+
+
 def download_product(
     product: Product,
     references: Sequence[TimedFile],
@@ -455,6 +646,16 @@ def download_product(
     log: Log,
 ) -> list[Path]:
     """Search JSOC and download one selected product."""
+
+    if product.instrument == "AIA":
+        return download_aia_with_drms(
+            product,
+            references,
+            raw_root,
+            email,
+            aia_sample_seconds,
+            log,
+        )
 
     u, Fido, a = load_download_dependencies()
     destination = raw_root / product.raw_subdir
@@ -512,9 +713,37 @@ def download_product(
         log(f"JSOC export segment: {product.segment} only")
     response = Fido.search(*query_attrs)
     count = response_record_count(response)
+    healthy_paths, healthy_times, invalid_before_fetch = assess_local_product(
+        product,
+        destination,
+        inventory_start,
+        inventory_end,
+        log,
+        verbose=True,
+    )
     if count == 0:
+        estimated_count = (
+            len(references)
+            if product.instrument == "HMI"
+            else int((end - start).total_seconds() // sample_seconds) + 1
+        )
+        log(
+            "JSOC EMPTY RESPONSE: the search returned zero records. "
+            f"Cadence/time-span estimate={estimated_count}; local healthy "
+            f"files on observation date={len(healthy_times)}; local invalid "
+            f"files={len(invalid_before_fetch)}."
+        )
+        if len(healthy_times) >= estimated_count:
+            log(
+                "JSOC is unavailable or returned an empty result, but the local "
+                "inventory covers the estimated request. Remote download skipped; "
+                "continuing to alignment with validated local files."
+            )
+            return healthy_paths
         raise RuntimeError(
-            f"JSOC returned no records for {product.label}. {product.note}".strip()
+            f"JSOC returned no records for {product.label}, and only "
+            f"{len(healthy_times)} healthy local file(s) were found; approximately "
+            f"{estimated_count} are required. {product.note}".strip()
         )
     log("JSOC RESPONSE TABLE:\n" + str(response))
     for block_number, block in enumerate(response, start=1):
@@ -532,15 +761,6 @@ def download_product(
             f"JSOC EXPECTED [{position:03d}/{len(expected_times):03d}]: "
             f"{record_time.isoformat()}"
         )
-    healthy_paths, healthy_times, invalid_before_fetch = assess_local_product(
-        product,
-        destination,
-        inventory_start,
-        inventory_end,
-        log,
-        verbose=True,
-    )
-
     if expected_times:
         missing_times = expected_times - healthy_times
         exact_matches = expected_times & healthy_times
