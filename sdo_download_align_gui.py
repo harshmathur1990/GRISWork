@@ -416,6 +416,11 @@ def download_product(
     pad = timedelta(seconds=max_delta_seconds)
     start = references[0].time - pad
     end = references[-1].time + pad
+    # JSOC can expose a record timestamp in UTC while retaining a TAI clock in
+    # the exported HMI filename.  Inventory the complete observation date so a
+    # harmless time-scale representation difference cannot force Fido.fetch.
+    inventory_start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    inventory_end = end.replace(hour=23, minute=59, second=59, microsecond=999999)
     sample_seconds = (
         aia_sample_seconds if product.instrument == "AIA" else product.native_cadence
     )
@@ -454,7 +459,7 @@ def download_product(
         )
     expected_times = response_nominal_times(response)
     healthy_paths, healthy_times, invalid_before_fetch = assess_local_product(
-        product, destination, start, end, log
+        product, destination, inventory_start, inventory_end, log
     )
 
     if expected_times:
@@ -480,10 +485,10 @@ def download_product(
     # Some JSOC table versions expose HMI TAI records as converted UTC values,
     # while exported filenames retain their nominal TAI clock.  In that case an
     # exact set comparison reports every local file as missing.  Record-count
-    # parity inside the same narrow query window is the safe fallback.
+    # parity on the same observation date is the safe fallback.
     if len(healthy_times) >= count:
         log(
-            f"The requested window already contains {len(healthy_times)} healthy "
+            f"The observation date already contains {len(healthy_times)} healthy "
             f"local {product.label} file(s) for {count} JSOC record(s). Download "
             "skipped (JSOC/local timestamp representations differ)."
         )
@@ -514,7 +519,7 @@ def download_product(
     # overwrite disabled, Parfive reuses all complete files and retrieves only
     # the now-missing records.
     _, downloaded_times, invalid = assess_local_product(
-        product, destination, start, end, log
+        product, destination, inventory_start, inventory_end, log
     )
     missing_after_fetch = expected_times - downloaded_times if expected_times else set()
     if len(downloaded_times) >= count:
@@ -536,7 +541,7 @@ def download_product(
                 f"Repair download failed for {product.label}: {details}"
             )
         _, repaired_times, still_invalid = assess_local_product(
-            product, destination, start, end, log
+            product, destination, inventory_start, inventory_end, log
         )
         if still_invalid:
             raise RuntimeError(
