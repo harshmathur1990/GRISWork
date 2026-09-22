@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Align other SDO channels to an already-aligned HMI continuum sequence.
+"""Align SDO channels to an already-aligned HMI continuum sequence.
 
 ``alignment_GUI_HMI.py`` writes each aligned HMI continuum image on the
 ground-based image grid.  Consequently, the image shape and WCS in each of
 those FITS files are a complete description of the required crop, rotation,
-and pixel scale.  This script registers a raw SDO image and reprojects it onto
-that grid.
+and pixel scale.  This script registers a raw SDO image when requested,
+differentially rotates it to the matched continuum reference time, and
+reprojects it onto that grid.  Differential rotation is enabled by default for
+all channels, including HMI channels, so mismatched downloaded frames are
+propagated to the continuum reference time before reprojection.
 
 By default, every source image sufficiently close in time to the aligned
 continuum sequence is mapped to its nearest continuum frame for each of these
@@ -33,14 +36,14 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 
-# CHANNELS = ("HMI/Magnetogram", "AIA/171", "AIA/1600", "AIA/304")
-CHANNELS = ("AIA/304",)
+CHANNELS = ("HMI/Magnetogram", "AIA/171", "AIA/1600", "AIA/304")
 
 # This deliberately treats the clock in an HMI ``*_TAI`` filename as a
 # nominal clock, rather than converting TAI to UTC.  alignment_GUI_HMI.py uses
@@ -180,7 +183,7 @@ def match_nearest(
     return matches
 
 
-def _load_dependencies() -> tuple[Any, Any, Any, Any]:
+def _load_dependencies() -> tuple[Any, Any, Any, Any, Any]:
     """Import the scientific packages only when processing is requested."""
 
     try:
@@ -208,6 +211,14 @@ def _load_dependencies() -> tuple[Any, Any, Any, Any]:
         ) from exc
 
     try:
+        from sunpy.coordinates import propagate_with_solar_surface
+    except ImportError as exc:
+        raise RuntimeError(
+            f"Could not import sunpy.coordinates.propagate_with_solar_surface: "
+            f"{exc}. Install a recent SunPy into {sys.executable}."
+        ) from exc
+
+    try:
         from aiapy.calibrate import register
     except ImportError as exc:
         raise RuntimeError(
@@ -226,7 +237,7 @@ def _load_dependencies() -> tuple[Any, Any, Any, Any]:
             f"Python environment running this script ({sys.executable})."
         ) from exc
 
-    return np, sunpy.map, register, fits
+    return np, sunpy.map, register, propagate_with_solar_surface, fits
 
 
 def _copy_source_metadata(
@@ -234,6 +245,8 @@ def _copy_source_metadata(
     source_meta: Any,
     source_name: str,
     reference_name: str,
+    *,
+    do_differential_rotation: bool,
 ) -> Any:
     """Keep the target WCS while identifying the actual source observation."""
 
@@ -265,9 +278,14 @@ def _copy_source_metadata(
         if key in source_meta:
             output_meta[key] = source_meta[key]
 
-    output_meta["ALNMETH"] = "REGISTER+REPROJECT"
+    output_meta["ALNMETH"] = (
+        "REGISTER+DIFFROT+REPROJECT"
+        if do_differential_rotation
+        else "REGISTER+REPROJECT"
+    )
     output_meta["ALNREF"] = reference_name
     output_meta["SRCFILE"] = source_name
+    output_meta["ALNROT"] = "DIFFERENTIAL" if do_differential_rotation else "NONE"
     return output_meta
 
 
@@ -278,10 +296,11 @@ def align_one(
     *,
     overwrite: bool,
     do_register: bool,
+    do_differential_rotation: bool,
 ) -> None:
     """Register and reproject one SDO image onto one continuum reference."""
 
-    np, sunpy_map, register, fits = _load_dependencies()
+    np, sunpy_map, register, propagate_with_solar_surface, fits = _load_dependencies()
 
     source_map = sunpy_map.Map(str(source_path))
     reference_map = sunpy_map.Map(str(reference_path))
@@ -298,13 +317,19 @@ def align_one(
         except Exception as exc:
             raise RuntimeError(f"aiapy registration failed for {source_path}") from exc
 
+    rotation_context = (
+        propagate_with_solar_surface()
+        if do_differential_rotation
+        else nullcontext()
+    )
     try:
-        aligned_map = source_map.reproject_to(
-            reference_map.wcs,
-            shape_out=reference_map.data.shape,
-            algorithm="interpolation",
-            order="bilinear",
-        )
+        with rotation_context:
+            aligned_map = source_map.reproject_to(
+                reference_map.wcs,
+                shape_out=reference_map.data.shape,
+                algorithm="interpolation",
+                order="bilinear",
+            )
     except Exception as exc:
         raise RuntimeError(
             f"Reprojection failed for {source_path} using {reference_path}"
@@ -317,6 +342,7 @@ def align_one(
         source_map.meta,
         source_path.name,
         reference_path.name,
+        do_differential_rotation=do_differential_rotation,
     )
     output_meta["naxis1"] = aligned_map.data.shape[1]
     output_meta["naxis2"] = aligned_map.data.shape[0]
@@ -341,6 +367,7 @@ def process_channel(
     max_delta_seconds: float,
     overwrite: bool,
     do_register: bool,
+    do_differential_rotation: bool,
     dry_run: bool,
 ) -> tuple[int, int]:
     """Align each temporally relevant source to its nearest reference."""
@@ -371,6 +398,7 @@ def process_channel(
                 output_path,
                 overwrite=overwrite,
                 do_register=do_register,
+                do_differential_rotation=do_differential_rotation,
             )
             written += 1
 
@@ -419,6 +447,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip aiapy.calibrate.register (only for already-registered input)",
     )
     parser.add_argument(
+        "--no-differential-rotation",
+        action="store_true",
+        help=(
+            "Skip SunPy solar-surface propagation during reprojection. By default, "
+            "source maps are differentially rotated to the matched reference time."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print frame associations without reading or writing FITS data",
@@ -446,6 +482,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             max_delta_seconds=args.max_time_delta,
             overwrite=args.overwrite,
             do_register=not args.no_register,
+            do_differential_rotation=not args.no_differential_rotation,
             dry_run=args.dry_run,
         )
         total_written += written
