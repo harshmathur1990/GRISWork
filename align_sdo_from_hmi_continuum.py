@@ -40,7 +40,7 @@ from typing import Any, Iterable, Sequence
 
 
 # CHANNELS = ("HMI/Magnetogram", "AIA/171", "AIA/1600", "AIA/304")
-CHANNELS = ("AIA/304")
+CHANNELS = ("AIA/304",)
 
 # This deliberately treats the clock in an HMI ``*_TAI`` filename as a
 # nominal clock, rather than converting TAI to UTC.  alignment_GUI_HMI.py uses
@@ -399,7 +399,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         choices=CHANNELS,
         default=list(CHANNELS),
-        help="Channels to process (default: all three)",
+        help="Channels to process (default: %(default)s)",
     )
     parser.add_argument(
         "--max-time-delta",
