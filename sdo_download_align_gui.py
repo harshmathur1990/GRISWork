@@ -23,7 +23,7 @@ import time
 import traceback
 import warnings
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -131,6 +131,26 @@ def route_console_output_to_gui(emit: Log) -> Any:
         for logger, handlers, propagate in saved:
             logger.handlers = handlers
             logger.propagate = propagate
+
+
+class DiagnosticLog:
+    """Tee pipeline messages to the GUI and a persistent UTF-8 text file."""
+
+    def __init__(self, gui_log: Log, path: Path) -> None:
+        self.gui_log = gui_log
+        self.path = path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = path.open("a", encoding="utf-8", buffering=1)
+
+    def __call__(self, message: str) -> None:
+        text = str(message)
+        self.gui_log(text)
+        stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        for line in text.splitlines() or [""]:
+            self.handle.write(f"{stamp} | {line}\n")
+
+    def close(self) -> None:
+        self.handle.close()
 
 
 @dataclass(frozen=True)
@@ -369,6 +389,8 @@ def assess_local_product(
     window_start: Any,
     window_end: Any,
     log: Log,
+    *,
+    verbose: bool = False,
 ) -> tuple[list[Path], set[Any], list[Path]]:
     """Validate local product files within the requested nominal time window."""
 
@@ -376,18 +398,46 @@ def assess_local_product(
     healthy_times: set[Any] = set()
     invalid_paths: list[Path] = []
 
-    for path in product_fits_files(product, destination):
+    all_fits = sorted(destination.glob("*.fits"))
+    candidates = product_fits_files(product, destination)
+    if verbose:
+        log(
+            f"LOCAL INVENTORY: {len(candidates)} image FITS candidate(s) in "
+            f"{destination}"
+        )
+        excluded = [path for path in all_fits if path not in candidates]
+        for path in excluded:
+            log(f"LOCAL EXCLUDED AUXILIARY FILE: {path}")
+
+    for path in candidates:
         try:
             nominal_time = nominal_time_from_name(path)
         except ValueError:
+            if verbose:
+                log(f"LOCAL UNRECOGNIZED NAME: {path}")
             continue
         if nominal_time < window_start or nominal_time > window_end:
+            if verbose:
+                log(
+                    f"LOCAL OUTSIDE INVENTORY DATE: time={nominal_time.isoformat()} "
+                    f"size={path.stat().st_size} path={path}"
+                )
             continue
 
         problem = fits_validation_error(path)
         if problem is not None:
+            if verbose:
+                log(
+                    f"LOCAL INVALID: time={nominal_time.isoformat()} "
+                    f"size={path.stat().st_size} path={path} reason={problem}"
+                )
             invalid_paths.append(quarantine_file(path, problem, log))
             continue
+        if verbose:
+            log(
+                f"LOCAL HEALTHY: time={nominal_time.isoformat()} "
+                f"size={path.stat().st_size} path={path}"
+            )
         healthy_paths.append(path)
         healthy_times.add(nominal_time)
 
@@ -449,6 +499,15 @@ def download_product(
         f"Searching {product.series} from {start.isoformat(sep=' ')} to "
         f"{end.isoformat(sep=' ')} (sample {sample_seconds} s)..."
     )
+    log(
+        "JSOC REQUEST: "
+        f"series={product.series!r}, start={start.isoformat()!r}, "
+        f"end={end.isoformat()!r}, sample_seconds={sample_seconds}, "
+        f"wavelength_angstrom={product.wavelength!r}, "
+        f"segment={product.segment!r}, destination={str(destination)!r}, "
+        f"overwrite_raw=False"
+    )
+    log("JSOC QUERY ATTRIBUTES: " + " AND ".join(repr(item) for item in query_attrs))
     if product.segment is not None:
         log(f"JSOC export segment: {product.segment} only")
     response = Fido.search(*query_attrs)
@@ -457,9 +516,29 @@ def download_product(
         raise RuntimeError(
             f"JSOC returned no records for {product.label}. {product.note}".strip()
         )
+    log("JSOC RESPONSE TABLE:\n" + str(response))
+    for block_number, block in enumerate(response, start=1):
+        log(
+            f"JSOC RESPONSE BLOCK {block_number} COLUMNS: "
+            f"{list(getattr(block, 'colnames', []))}"
+        )
     expected_times = response_nominal_times(response)
+    log(
+        f"JSOC RESPONSE SUMMARY: providers={len(response)}, records={count}, "
+        f"parsed_nominal_times={len(expected_times)}"
+    )
+    for position, record_time in enumerate(sorted(expected_times), start=1):
+        log(
+            f"JSOC EXPECTED [{position:03d}/{len(expected_times):03d}]: "
+            f"{record_time.isoformat()}"
+        )
     healthy_paths, healthy_times, invalid_before_fetch = assess_local_product(
-        product, destination, inventory_start, inventory_end, log
+        product,
+        destination,
+        inventory_start,
+        inventory_end,
+        log,
+        verbose=True,
     )
 
     if expected_times:
@@ -474,6 +553,11 @@ def download_product(
         if not missing_times:
             log("Every requested record is already available and healthy; download skipped.")
             return healthy_paths
+        for position, record_time in enumerate(sorted(missing_times), start=1):
+            log(
+                f"MISSING RECORD [{position:03d}/{len(missing_times):03d}]: "
+                f"{record_time.isoformat()}"
+            )
     else:
         # This is a compatibility fallback for an unexpected response table
         # schema. Fido/Parfive will still skip existing destination files.
@@ -495,6 +579,11 @@ def download_product(
         return healthy_paths
 
     log(f"Staging/downloading missing records to {destination}")
+    log(
+        "FETCH START: Fido.fetch will receive the complete JSOC response because "
+        "JSOC does not support downloading a sliced response; overwrite=False "
+        "should reuse paths whose exported filenames already exist."
+    )
 
     downloaded = Fido.fetch(
         response,
@@ -560,6 +649,13 @@ def download_product(
                 )
 
     paths = [Path(str(path)) for path in downloaded]
+    for position, path in enumerate(paths, start=1):
+        exists = path.exists()
+        size = path.stat().st_size if exists else -1
+        log(
+            f"FETCH RESULT [{position:03d}/{len(paths):03d}]: "
+            f"exists={exists} size={size} path={path}"
+        )
     log(f"Download finished ({len(paths)} fetched or reused file(s)).")
     return paths
 
@@ -617,7 +713,7 @@ def align_product(
     return written, skipped
 
 
-def run_pipeline(
+def _run_pipeline(
     products: Sequence[Product],
     raw_root: Path,
     aligned_root: Path,
@@ -675,6 +771,51 @@ def run_pipeline(
         f"Finished all products: wrote {total_written} aligned FITS file(s), "
         f"skipped {total_skipped} existing file(s)."
     )
+
+
+def run_pipeline(
+    products: Sequence[Product],
+    raw_root: Path,
+    aligned_root: Path,
+    email: str,
+    aia_sample_seconds: int,
+    max_delta_seconds: float,
+    overwrite: bool,
+    log: Log,
+) -> None:
+    """Run the pipeline while saving a complete persistent diagnostic log."""
+
+    stamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%z")
+    log_path = aligned_root / "logs" / f"sdo_download_align_{stamp}.log"
+    diagnostic = DiagnosticLog(log, log_path)
+    try:
+        diagnostic("SDO DOWNLOAD/ALIGN DIAGNOSTIC LOG")
+        diagnostic(f"Diagnostic log file: {log_path}")
+        diagnostic(f"Python executable: {sys.executable}")
+        diagnostic(f"Python version: {sys.version.replace(chr(10), ' ')}")
+        diagnostic(f"Raw root: {raw_root}")
+        diagnostic(f"Aligned root: {aligned_root}")
+        diagnostic(
+            "Selected products: " + ", ".join(product.label for product in products)
+        )
+        diagnostic(f"AIA sample seconds: {aia_sample_seconds}")
+        diagnostic(f"Maximum alignment delta seconds: {max_delta_seconds}")
+        diagnostic(f"Recreate aligned outputs: {overwrite}")
+        _run_pipeline(
+            products,
+            raw_root,
+            aligned_root,
+            email,
+            aia_sample_seconds,
+            max_delta_seconds,
+            overwrite,
+            diagnostic,
+        )
+    except Exception:
+        diagnostic("PIPELINE EXCEPTION:\n" + traceback.format_exc())
+        raise
+    finally:
+        diagnostic.close()
 
 
 def launch_gui(args: argparse.Namespace) -> int:
