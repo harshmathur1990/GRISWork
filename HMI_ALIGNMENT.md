@@ -15,8 +15,8 @@ Align each frame, then click **Save Data**. The output directory contains:
   time differences, fitted centres, wavelength indices, and relative output paths.
 - `registered/`: full images after `register()`, including their WCS, saved once
   per matched HMI input. Original HMI files are untouched.
-- `gris_wcs/gris_0000.fits`, etc.: the selected native GRIS wavelength image with
-  its fitted solar WCS. This is the reusable alignment, independent of a crop.
+- `gris_wcs/gris_0000.hdr`, etc.: text FITS headers containing the fitted solar
+  WCS and native GRIS dimensions. No GRIS image data is saved again.
 
 The WCS uses the matched HMI observer and coordinate reference time. `GRISDATE`
 separately records the actual GRIS timestamp. Do not replace the WCS observation
@@ -38,11 +38,19 @@ import json
 from pathlib import Path
 import matplotlib.pyplot as plt
 import sunpy.map
+from astropy.io import fits
 
 root = Path('/mnt/f/GRIS/aligned_SDO/HMI/Continuum')
-record = json.loads((root / 'alignment.json').read_text())['frames'][0]
+manifest = json.loads((root / 'alignment.json').read_text())
+record = manifest['frames'][0]
 hmi = sunpy.map.Map(root / record['registered_hmi'])
-gris = sunpy.map.Map(root / record['gris_map'])
+header = fits.Header.fromtextfile(root / record['gris_header'])
+with fits.open(manifest['source_gris'], memmap=True) as hdus:
+    cube = hdus[0].data
+    t, w = record['frame_index'], record['wavelength_index']
+    data = (cube[t, 0, :, :, w] if cube.ndim == 5 else cube[0, :, :, w]).copy()
+assert data.shape == (header['NAXIS2'], header['NAXIS1'])
+gris = sunpy.map.Map(data, header)
 
 fig = plt.figure()
 ax = fig.add_subplot(projection=hmi)

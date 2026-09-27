@@ -423,8 +423,8 @@ def animate(
             aligned.meta['grisdate'] = timestamps[a_t].isoformat()
             aligned.meta['grisidx'] = a_t
             aligned.meta['griswave'] = wavelength
-            gris_path = gris_dir / f'gris_{a_t:04d}.fits'
-            aligned.save(gris_path, overwrite=True)
+            gris_path = gris_dir / f'gris_{a_t:04d}.hdr'
+            aligned.fits_header.totextfile(gris_path, overwrite=True)
             crop_name = None
             if save_crops:
                 crop = downsample_sunpy_map(
@@ -438,9 +438,9 @@ def animate(
                 hmi_minus_gris_seconds=(matched_time - timestamps[a_t]).total_seconds(),
                 source_hmi=str(source.resolve()),
                 registered_hmi=str(registered_path.relative_to(hmi_write_path)),
-                gris_map=str(gris_path.relative_to(hmi_write_path)),
+                gris_header=str(gris_path.relative_to(hmi_write_path)),
                 crop=crop_name, centre_arcsec=[xc, yc], wavelength_index=wavelength))
-        manifest = dict(schema_version=1, source_gris=str((base_path / filename).resolve()),
+        manifest = dict(schema_version=2, source_gris=str((base_path / filename).resolve()),
                         timestamps_csv=str(Path(timestamps_path).resolve()),
                         native_scale_arcsec=0.135, frames=records)
         (hmi_write_path / 'alignment.json').write_text(json.dumps(manifest, indent=2) + '\n')
