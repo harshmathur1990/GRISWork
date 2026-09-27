@@ -73,3 +73,40 @@ frames matched to one HMI file cannot overwrite each other. The existing
 `align_sdo_from_hmi_continuum.py` still consumes cropped continuum files and
 uses nominal filename clocks; it has not been migrated to this manifest and
 should not be treated as using the new exact UTC matching.
+
+## Align with two marked features
+
+1. Select the time frame and a GRIS continuum wavelength where the same features
+   are visible in HMI.
+2. Click **Feature 1**, then click the centre of that feature in the bottom GRIS
+   image and the top registered HMI image, in either order. Orange markers label
+   the first pair. Flickering pauses so that the bottom image stays on GRIS.
+3. Click **Feature 2** and mark a second distinct feature in both images. Cyan
+   markers label this pair. Re-click either image to replace the selected mark.
+4. Click **Auto Align**. It first fits a common translation to both pairs through
+   WCS, then searches for the translation with the highest mean normalized
+   correlation in patches around the two GRIS features. Scale and orientation
+   remain fixed. The fitted centre and both correlation scores appear below the
+   images, and the flicker preview resumes for visual inspection.
+5. Click **Save Data** to persist the fitted WCS headers. The manifest also records
+   the marker positions in native pixels, patch correlations, landmark fit, and
+   correlation refinement for automatically aligned frames. No GRIS images are
+   written again.
+
+**Patch px** is the patch half-width in native GRIS pixels (default 20, giving a
+41 × 41 patch away from edges). **Search ″** bounds the correlation refinement
+in each solar coordinate around the landmark estimate (default ±1.5 arcsec).
+Brightness offsets and contrast scaling are removed separately in each patch.
+Masked/NaN pixels are excluded; each patch needs at least 25 valid samples and
+80% HMI coverage. A correlation below 0.3 in either patch, or a best match at the
+search boundary, leaves the existing alignment unchanged and displays a message.
+These thresholds are basic checks, not an uncertainty estimate; inspect the
+flicker result, particularly for repetitive or evolving features.
+
+**Clear Marks** clears the current frame/wavelength's points. **Resume Flicker**
+exits marking mode without applying an alignment. Marks are independent for each
+frame and wavelength and remain available when returning to that image in the
+same session. Manual centre changes invalidate the previous automatic-fit report.
+Matplotlib toolbar pan/zoom takes precedence over feature marking; turn it off
+before placing a mark. Outside marking mode, clicking HMI still sets the centre
+manually as before.
