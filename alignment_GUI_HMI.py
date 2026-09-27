@@ -211,6 +211,49 @@ def align_feature_pairs(image, registered, gris_points, hmi_points,
                        gris_points=gris_points.tolist(), hmi_points=hmi_points.tolist())
 
 
+def align_frame_sequence(frame_count, reference_index, load_frame, gris_points,
+                         hmi_points, patch_radius=20, search_radius=1.5):
+    """Yield (index, centre, report, error), starting at the marked reference.
+
+    Reuse native GRIS patches (the input cube is spatially aligned). Predict
+    their HMI locations from the last successful centre using each new HMI WCS.
+    Forward and backward passes independently start from the reference fit.
+    """
+    if not 0 <= reference_index < frame_count:
+        raise ValueError("Reference frame is outside the sequence.")
+    points = np.asarray(gris_points, dtype=float)
+
+    def fit(index, predicted):
+        image, registered = load_frame(index)
+        if predicted is not None:
+            native = gris_map(image, registered, *predicted)
+            hx, hy = pixel_to_pixel(native.wcs, registered.wcs, points[:, 0], points[:, 1])
+            targets = np.column_stack((hx, hy))
+        else:
+            targets = hmi_points
+        return align_feature_pairs(image, registered, points, targets,
+                                   patch_radius=patch_radius, search_radius=search_radius)
+
+    try:
+        reference_centre, report = fit(reference_index, None)
+    except (ValueError, OSError, RuntimeError) as error:
+        yield reference_index, None, None, str(error)
+        return
+    report.update(sequence_reference_frame=reference_index, seed_frame=None)
+    yield reference_index, reference_centre, report, None
+    for indices in (range(reference_index + 1, frame_count), range(reference_index - 1, -1, -1)):
+        previous, seed_index = reference_centre, reference_index
+        for index in indices:
+            try:
+                centre, report = fit(index, previous)
+            except (ValueError, OSError, RuntimeError) as error:
+                yield index, None, None, str(error)
+                continue  # Never propagate a failed fit to later frames.
+            report.update(sequence_reference_frame=reference_index, seed_frame=seed_index)
+            previous, seed_index = centre, index
+            yield index, centre, report, None
+
+
 def animate(
     base_path, filename, hmi_path, hmi_write_path,
     timestamps_path, subpixel_target=0.005, save_crops=False
@@ -252,6 +295,8 @@ def animate(
     val_dict = dict()
     feature_pairs = {}  # Separate marks for each (time, wavelength).
     selected_feature = [None]
+    batch_state = [None]
+    batch_issues = {}
 
     def get_val(time):
         if time in val_dict:
@@ -261,10 +306,12 @@ def animate(
             init_x = val_dict[max_time]['init_x']
             init_y = val_dict[max_time]['init_y']
             wave = val_dict[max_time]['wave']
-            set_val(time, init_x, init_y, wave)
+            set_val(time, init_x, init_y, wave, clear_issue=False)
             return init_x, init_y, wave
 
-    def set_val(time, init_x, init_y, wave):
+    def set_val(time, init_x, init_y, wave, clear_issue=True):
+        if clear_issue:
+            batch_issues.pop(time, None)
 
         if time in val_dict:
             val_dict[time].pop('auto_alignment', None)
@@ -398,7 +445,8 @@ def animate(
     feature_buttons = [Button(plt.axes([0.08 + i * 0.18, 0.33, 0.16, 0.035]), f'Feature {i + 1}')
                        for i in range(2)]
     auto_button = Button(plt.axes([0.44, 0.33, 0.18, 0.035]), 'Auto Align')
-    clear_button = Button(plt.axes([0.64, 0.33, 0.18, 0.035]), 'Clear Marks')
+    batch_button = Button(plt.axes([0.64, 0.33, 0.18, 0.035]), 'Align All Frames')
+    clear_button = Button(plt.axes([0.84, 0.33, 0.13, 0.035]), 'Clear Marks')
     flicker_button = Button(plt.axes([0.08, 0.28, 0.18, 0.04]), 'Resume Flicker')
     patch_box = TextBox(plt.axes([0.37, 0.28, 0.07, 0.035]), 'Patch px ', initial='20')
     search_box = TextBox(plt.axes([0.51, 0.28, 0.07, 0.035]), 'Search ″ ', initial='1.5')
@@ -479,6 +527,106 @@ def animate(
         c1, c2 = report['feature_correlations']
         status.set_text(f'Aligned: centre ({centre[0]:.3f}, {centre[1]:.3f}) arcsec; correlations {c1:.3f}, {c2:.3f}.')
         fig.canvas.draw_idle()
+
+    def finish_batch(message):
+        batch_timer.stop()
+        batch_state[0] = None
+        batch_button.label.set_text('Align All Frames')
+        for widget in batch_controls:
+            widget.set_active(True)
+        selected_feature[0] = None
+        update_timer()
+        remaining = sorted(batch_issues)
+        if remaining:
+            print('Frames requiring review:', batch_issues)
+            message += f' Review {len(remaining)} frame(s): {remaining[:8]}'
+            if len(remaining) > 8:
+                message += '… (full list in console)'
+        status.set_text(message)
+        fig.canvas.draw_idle()
+
+    def batch_step():
+        state = batch_state[0]
+        if state is None:
+            return
+        if state['stop']:
+            state['sequence'].close()
+            finish_batch(f"Stopped. Aligned {state['success']}/{t_max + 1} frames.")
+            return
+        try:
+            index, centre, report, error = next(state['sequence'])
+        except StopIteration:
+            finish_batch(f"Batch finished. Aligned {state['success']}/{t_max + 1} frames.")
+            return
+        except Exception as error:
+            # Restore interactive controls even if a file/library raises unexpectedly.
+            state['sequence'].close()
+            finish_batch(f'Batch stopped: {error}')
+            return
+        state['processed'] += 1
+        if error is not None:
+            batch_issues[index] = error
+            print(f'Frame {index}: {error}')
+        else:
+            set_val(index, float(centre[0]), float(centre[1]), state['wave'])
+            val_dict[index]['auto_alignment'] = report
+            feature_pairs[(index, state['wave'])] = {
+                i: {'gris': report['gris_points'][i], 'hmi': report['hmi_points'][i]}
+                for i in range(2)}
+            state['success'] += 1
+        status.set_text(f"Batch: {state['processed']}/{t_max + 1} checked; "
+                        f"{state['success']} aligned. Click Stop Alignment to stop after this frame.")
+        fig.canvas.draw_idle()
+
+    def align_all_frames(event):
+        if batch_state[0] is not None:
+            batch_state[0]['stop'] = True
+            status.set_text('Stopping after the current frame…')
+            fig.canvas.draw_idle()
+            return
+        pairs = feature_pairs.get((time[0], wave[0]), {})
+        if any(side not in pairs.get(i, {}) for i in range(2) for side in ('gris', 'hmi')):
+            status.set_text('Mark both features on this reference frame first, then Align All Frames.')
+            fig.canvas.draw_idle()
+            return
+        try:
+            radius, search = int(patch_box.text), float(search_box.text)
+            if radius < 2 or not np.isfinite(search) or search <= 0:
+                raise ValueError('Use Patch px ≥ 2 and a finite positive Search distance.')
+        except ValueError as error:
+            status.set_text(str(error))
+            fig.canvas.draw_idle()
+            return
+        reference, wavelength = time[0], wave[0]
+        def load_frame(index):
+            _, source = get_closest(timestamps[index], fits_datetimes)
+            return get_orig_image(data, index, wavelength), get_aia_map(source)
+        sequence = align_frame_sequence(
+            t_max + 1, reference, load_frame,
+            [pairs[i]['gris'] for i in range(2)], [pairs[i]['hmi'] for i in range(2)],
+            patch_radius=radius, search_radius=search)
+        batch_issues.update({i: 'Not processed in the batch; align or review this frame.'
+                             for i in range(t_max + 1)})
+        batch_state[0] = dict(sequence=sequence, wave=wavelength, stop=False, success=0, processed=0)
+        timer.stop()
+        for widget in batch_controls:
+            widget.set_active(False)
+        batch_button.label.set_text('Stop Alignment')
+        status.set_text(f'Aligning all frames from reference {reference}, wavelength {wavelength}…')
+        fig.canvas.draw_idle()
+        batch_timer.start()
+
+    batch_controls = [*feature_buttons, auto_button, clear_button, flicker_button,
+                      save_button, time_slider, wave_slider, init_x_textbox,
+                      init_y_textbox, patch_box, search_box]
+    batch_timer = fig.canvas.new_timer(interval=50)
+    batch_timer.add_callback(batch_step)
+
+    def close_batch(event):
+        batch_timer.stop()
+        if batch_state[0] is not None:
+            batch_state[0]['sequence'].close()
+            batch_state[0] = None
 
     def prepare_flicker_callback(frame_toggle, im, axs, fig, image1, image2, text_image):
         def flicker_callback(*args):
@@ -568,9 +716,11 @@ def animate(
             show_gris()
 
     def do_save(event):
-        missing = [i for i in range(t_max + 1) if i not in val_dict]
+        missing = [i for i in range(t_max + 1) if i not in val_dict or i in batch_issues]
         if missing:
             print(f"Please align the remaining frame indices: {missing}")
+            status.set_text(f'Cannot save yet: align/review frames {missing}.')
+            fig.canvas.draw_idle()
             return
         hmi_write_path.mkdir(parents=True, exist_ok=True)
         registered_dir = hmi_write_path / 'registered'
@@ -622,7 +772,7 @@ def animate(
             time[0],
             init_x[0],
             init_y[0],
-            wave[0]
+            wave[0], clear_issue=False
         )
         update_timer()
 
@@ -631,8 +781,13 @@ def animate(
         status.set_text('Frame changed. Select feature buttons to mark this frame.')
         time[0] = int(val)
         update_timer()
+        if time[0] in batch_issues:
+            status.set_text(f'Frame {time[0]} needs review: {batch_issues[time[0]]}')
+            fig.canvas.draw_idle()
 
     def on_click_im0(event):
+        if batch_state[0] is not None:
+            return
         toolbar = getattr(fig.canvas, 'toolbar', None)
         if event.button != 1 or (toolbar is not None and toolbar.mode):
             return
@@ -669,6 +824,8 @@ def animate(
         update_timer()
 
     def handle_enter(event):
+        if batch_state[0] is not None:
+            return
         if event.key == "enter" and event.inaxes in (slider_ax_init_x, slider_ax_init_y):
             text_x = init_x_textbox.text
             text_y = init_y_textbox.text
@@ -687,11 +844,13 @@ def animate(
     for index, button in enumerate(feature_buttons):
         button.on_clicked(lambda event, index=index: choose_feature(index))
     auto_button.on_clicked(auto_align)
+    batch_button.on_clicked(align_all_frames)
     clear_button.on_clicked(clear_marks)
     flicker_button.on_clicked(resume_flicker)
     save_button.on_clicked(do_save)
     fig.canvas.mpl_connect('button_press_event', on_click_im0)
     fig.canvas.mpl_connect("key_press_event", handle_enter)
+    fig.canvas.mpl_connect("close_event", close_batch)
 
     plt.subplots_adjust(left=0.05, right=0.99, bottom=0.50, top=0.96, wspace=0.0, hspace=0.2)
 

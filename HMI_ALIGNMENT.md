@@ -110,3 +110,38 @@ same session. Manual centre changes invalidate the previous automatic-fit report
 Matplotlib toolbar pan/zoom takes precedence over feature marking; turn it off
 before placing a mark. Outside marking mode, clicking HMI still sets the centre
 manually as before.
+
+## Automatically align the whole time sequence
+
+Mark both feature pairs on any reference frame, choose the continuum wavelength,
+and click **Align All Frames**. There is no need to visit or mark every frame.
+The tool aligns the reference first, then processes later frames in order and
+returns to the reference to process earlier frames in reverse order. It uses the
+selected wavelength throughout the batch and independently matches HMI to each
+frame's CSV timestamp.
+
+The same native GRIS patch locations are reused: this assumes the input GRIS cube
+is already spatially aligned, as in the default input filename. Each successful
+centre seeds the next frame, with predicted HMI pixel positions recalculated
+through that frame's registered WCS. Correlation then refines the translation
+within **Search ″** of the seed. This follows gradual motion without reusing raw
+HMI pixel coordinates. It does not independently track large feature motion
+within an unaligned GRIS cube.
+
+Progress appears below the images. During a batch, editing and saving are disabled,
+and the batch button becomes **Stop Alignment**; stopping takes effect between
+frames and retains completed fits. No files are written until **Save Data**.
+
+A failed frame keeps its previous alignment and is flagged for review. Subsequent
+frames start from the last successful fit. If the reference itself fails, the
+batch stops. Failed or unprocessed frame indices appear in the status/console;
+visiting those frames also shows the reason. Saving is blocked until these frames
+have been aligned successfully or adjusted manually. Simply visiting a frame does
+not accept its inherited alignment. You can re-mark a failed frame and use
+**Auto Align**, or rerun **Align All Frames** from a better reference.
+
+After completion, inspect the flicker preview using the time slider, then click
+**Save Data**. The headers and manifest include each frame's independent fit,
+correlation scores, reference index, and seed frame. GRIS image data is still not
+saved again. A new batch replaces successful fits, including any earlier manual
+fits, with results from the selected reference and wavelength.
