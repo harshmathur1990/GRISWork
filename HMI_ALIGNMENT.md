@@ -160,11 +160,17 @@ python align_sdo_from_hmi_continuum.py \
 
 The default channels are HMI/Continuum, HMI/Magnetogram, AIA/171, AIA/1600, and
 AIA/304. Use `--channels AIA/171 AIA/1600` to select a subset. Each GRIS frame is
-matched to the nearest source in each selected channel using `GRISDATE` from the
-header. HMI filename TAI clocks are converted to UTC; AIA filenames retain their
-UTC clock, including fractional seconds. `--max-time-delta` defaults to 30 seconds.
-All source images within that distance of any GRIS frame are retained, so faster
-AIA observations between GRIS exposures are not discarded.
+matched to exactly one nearest source in each selected channel using the exact
+`timestamp_utc` from `serie_timestamps.csv`. The CSV is read directly; pass
+`--timestamps /path/to/serie_timestamps.csv` to choose another file. CSV
+`series_index - 1` must match the header's `GRISIDX`, with one header per CSV row.
+The headers supply the spatial WCS; CSV timestamps determine temporal matching. HMI filename TAI clocks are converted to UTC; AIA filenames retain their
+UTC clock, including fractional seconds. By default the closest available
+observation is selected regardless of its offset. Set `--max-time-delta SECONDS`
+only if you want to reject more distant matches. Only observations selected by
+at least one GRIS frame are registered; intermediate or extra SDO exposures are
+not exported. Two GRIS frames may share one registered file while retaining
+separate manifest entries and signed time offsets.
 
 Outputs are:
 
@@ -176,11 +182,12 @@ Outputs are:
   Its `frames` entries contain `gris_header`, `timestamp_utc`, and a `channels`
   dictionary. Each channel entry includes the source path, `registered_sdo` path,
   UTC filename timestamp, signed SDO-minus-GRIS time offset, and processing status.
-  `observations[channel]` lists every retained SDO image with its nearest GRIS
-  frame/header, including observations not selected as a frame's nearest match.
   Header and output paths are relative to the manifest's directory.
 
 The root manifest is refreshed on every non-dry run for the selected channels.
+It records the source CSV path and one entry per GRIS frame. Files left in
+`registered/` by earlier runs are not deleted, but unselected ones are omitted
+from the new manifest.
 The GUI's separate `HMI/Continuum/alignment.json` remains untouched. Existing
 crops are not deleted, but this script no longer writes cropped HMI/AIA files,
 reprojects onto the GRIS grid, or changes an observation's time by differential
@@ -188,7 +195,7 @@ rotation. The old `--no-differential-rotation` flag has been removed. GRIS heade
 files and image data are not duplicated or modified.
 
 Use `--dry-run` to inspect associations without loading image arrays or writing
-files (GRIS text headers are read). Missing/too-distant observations are marked
+files (the CSV and GRIS text headers are read). Missing/too-distant observations are marked
 `unmatched`; processing errors are marked `failed`, with the reason in the
 manifest. Such runs return exit code 1 while keeping successful results. The
 manifest never links a failed registration as a usable output.

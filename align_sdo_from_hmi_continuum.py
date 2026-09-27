@@ -2,8 +2,9 @@
 """Associate full registered SDO images with saved GRIS WCS headers.
 
 Read HMI/Continuum/gris_wcs/*.hdr under --aligned-root (or --gris-wcs).
-Match each header's GRISDATE to each channel in UTC, retain all sources within
-the time window of any GRIS frame, register each source once, and write <channel>/registered/<source-name>.fits. Write one
+For each exact GRIS timestamp in serie_timestamps.csv, choose one nearest
+observation per channel in UTC. Register only selected sources, once each, and
+write <channel>/registered/<source-name>.fits. Write one
 alignment.json at --aligned-root linking all channels to the GRIS headers.
 No GRIS images, cropped images, reprojections, or differential rotations are
 written. Source observation times and registered WCS remain intact.
@@ -20,10 +21,12 @@ import math
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+
+from hmi_alignment import load_timestamps
 
 CHANNELS = ("HMI/Continuum", "HMI/Magnetogram", "AIA/171", "AIA/1600", "AIA/304")
 HMI_TIME_RE = re.compile(r"(?P<date>\d{8})_(?P<time>\d{6})(?P<fraction>\.\d+)?_TAI", re.I)
@@ -123,12 +126,14 @@ def load_gris_headers(directory: Path) -> list[GrisReference]:
 
 
 def match_nearest(reference: GrisReference, sources: Sequence[TimedFile],
-                  max_delta_seconds: float) -> TimedFile | None:
+                  max_delta_seconds: float | None) -> TimedFile | None:
     """Nearest source for this GRIS frame; shared sources are registered once."""
     if not sources:
         return None
     source = min(sources, key=lambda item: (abs(item.time - reference.time), item.time, item.path.name))
-    return source if abs((source.time - reference.time).total_seconds()) <= max_delta_seconds else None
+    if max_delta_seconds is not None and abs((source.time - reference.time).total_seconds()) > max_delta_seconds:
+        return None
+    return source
 
 
 def register_one(source_path: Path, output_path: Path, *, overwrite: bool,
@@ -152,58 +157,52 @@ def relative_path(path: Path, root: Path) -> str:
 
 
 def process_channel(channel: str, references: Sequence[GrisReference], raw_root: Path,
-                    aligned_root: Path, *, max_delta_seconds: float, overwrite: bool,
-                    do_register: bool, dry_run: bool) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]], int, int]:
-    """Keep every temporally relevant source and each GRIS frame's nearest match."""
+                    aligned_root: Path, *, max_delta_seconds: float | None, overwrite: bool,
+                    do_register: bool, dry_run: bool) -> tuple[dict[int, dict[str, Any]], int, int]:
+    """Choose one source per GRIS time; register only the selected unique files."""
     records: dict[int, dict[str, Any]] = {}
     try:
         sources = index_fits(raw_root / channel)
     except FileNotFoundError as error:
         print(f'{channel}: {error}', file=sys.stderr)
-        return {ref.frame_index: dict(status='unmatched', reason=str(error)) for ref in references}, [], 0, 0
+        return {ref.frame_index: dict(status='unmatched', reason=str(error)) for ref in references}, 0, 0
     processed = {}
-    observations = []
     written = skipped = 0
-    for source in sources:
-        nearest = min(references, key=lambda ref: (abs(source.time - ref.time), ref.time, ref.frame_index))
-        if abs((source.time - nearest.time).total_seconds()) > max_delta_seconds:
-            continue
-        output = aligned_root / channel / 'registered' / source.path.name
-        error = None
-        if output.exists() and not overwrite:
-            state = 'existing'
-            skipped += 1
-        elif dry_run:
-            state = 'planned'
-        else:
-            try:
-                register_one(source.path, output, overwrite=overwrite, do_register=do_register)
-                state = 'written'
-                written += 1
-            except Exception as exc:
-                state, error = 'failed', str(exc)
-                print(f'Failed to register {source.path}: {error}', file=sys.stderr)
-        print(f'{channel}: {source.path.name} -> nearest GRIS {nearest.frame_index} ({state})')
-        record = dict(status=state, source_sdo=str(source.path.resolve()),
-                      timestamp_utc=source.time.isoformat(), timestamp_source='filename',
-                      registered_sdo=relative_path(output, aligned_root) if state != 'failed' else None,
-                      processing='existing_file' if state == 'existing' else
-                                 ('register' if do_register else 'already_registered_input'))
-        if error:
-            record['reason'] = error
-        processed[source.path] = record
-        observations.append(dict(record, nearest_gris_frame_index=nearest.frame_index,
-                                 gris_header=relative_path(nearest.path, aligned_root),
-                                 sdo_minus_gris_seconds=(source.time - nearest.time).total_seconds()))
     for ref in references:
         source = match_nearest(ref, sources, max_delta_seconds)
         if source is None:
             records[ref.frame_index] = dict(status='unmatched', reason=f'No observation within {max_delta_seconds:g} s')
             print(f'{channel}: GRIS {ref.frame_index}: no match within {max_delta_seconds:g} s')
-        else:
-            records[ref.frame_index] = dict(processed[source.path],
-                                           sdo_minus_gris_seconds=(source.time - ref.time).total_seconds())
-    return records, observations, written, skipped
+            continue
+        if source.path not in processed:
+            output = aligned_root / channel / 'registered' / source.path.name
+            error = None
+            if output.exists() and not overwrite:
+                state = 'existing'
+                skipped += 1
+            elif dry_run:
+                state = 'planned'
+            else:
+                try:
+                    register_one(source.path, output, overwrite=overwrite, do_register=do_register)
+                    state = 'written'
+                    written += 1
+                except Exception as exc:
+                    state, error = 'failed', str(exc)
+                    print(f'Failed to register {source.path}: {error}', file=sys.stderr)
+            record = dict(status=state, source_sdo=str(source.path.resolve()),
+                          timestamp_utc=source.time.isoformat(), timestamp_source='filename',
+                          registered_sdo=relative_path(output, aligned_root) if state != 'failed' else None,
+                          processing='existing_file' if state == 'existing' else
+                                     ('register' if do_register else 'already_registered_input'))
+            if error:
+                record['reason'] = error
+            processed[source.path] = record
+        delta = (source.time - ref.time).total_seconds()
+        records[ref.frame_index] = dict(processed[source.path], sdo_minus_gris_seconds=delta)
+        print(f'{channel}: GRIS {ref.frame_index} at {ref.time.isoformat()} -> '
+              f'{source.path.name} (SDO − GRIS={delta:+.3f} s)')
+    return records, written, skipped
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -214,49 +213,53 @@ def build_parser() -> argparse.ArgumentParser:
                         help='Output root for alignment.json and channel/registered/ directories')
     parser.add_argument('--gris-wcs', type=Path,
                         help='GRIS .hdr directory (default: <aligned-root>/HMI/Continuum/gris_wcs)')
+    parser.add_argument('--timestamps', type=Path, default=Path(__file__).with_name('serie_timestamps.csv'),
+                        help='CSV containing exact GRIS timestamps (default: serie_timestamps.csv beside script)')
     parser.add_argument('--channels', nargs='+', choices=CHANNELS, default=list(CHANNELS))
-    parser.add_argument('--max-time-delta', type=float, default=30.0, metavar='SECONDS',
-                        help='Maximum absolute SDO/GRIS UTC time difference (default: 30)')
+    parser.add_argument('--max-time-delta', type=float, default=None, metavar='SECONDS',
+                        help='Optional maximum SDO/GRIS UTC offset; by default always select the nearest observation')
     parser.add_argument('--overwrite', action='store_true', help='Replace existing registered FITS outputs')
     parser.add_argument('--no-register', action='store_true', help='Input is already registered; save full maps as supplied')
-    parser.add_argument('--dry-run', action='store_true', help='Read GRIS text headers and filenames only; write nothing')
+    parser.add_argument('--dry-run', action='store_true', help='Read the CSV, GRIS text headers, and SDO filenames; write nothing')
     return parser
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if not math.isfinite(args.max_time_delta) or args.max_time_delta < 0:
+    if args.max_time_delta is not None and (not math.isfinite(args.max_time_delta) or args.max_time_delta < 0):
         raise ValueError('--max-time-delta must be finite and non-negative')
     headers_dir = args.gris_wcs or args.aligned_root / 'HMI' / 'Continuum' / 'gris_wcs'
     references = load_gris_headers(headers_dir)
+    timestamps = load_timestamps(args.timestamps, len(references))
+    if [ref.frame_index for ref in references] != list(range(len(timestamps))):
+        raise ValueError('GRISIDX must cover each CSV series_index - 1 exactly once')
+    # CSV exposure times determine temporal matches; the headers supply spatial WCS.
+    references = [replace(ref, time=timestamps[ref.frame_index]) for ref in references]
     channels = list(dict.fromkeys(args.channels))
     frames = [dict(frame_index=ref.frame_index, series_index=ref.frame_index + 1,
                    timestamp_utc=ref.time.isoformat(), gris_header=relative_path(ref.path, args.aligned_root),
                    gris_shape=list(ref.shape), wavelength_index=ref.wavelength_index,
                    gris_wcs_reference_time_utc=ref.wcs_time, channels={}) for ref in references]
     written = skipped = problems = 0
-    observations = {}
     for channel in channels:
-        records, channel_observations, n_written, n_skipped = process_channel(
+        records, n_written, n_skipped = process_channel(
             channel, references, args.raw_root, args.aligned_root,
             max_delta_seconds=args.max_time_delta, overwrite=args.overwrite,
             do_register=not args.no_register, dry_run=args.dry_run)
-        observations[channel] = channel_observations
-        problems += sum(item['status'] == 'failed' for item in channel_observations)
         written += n_written
         skipped += n_skipped
         for frame in frames:
             record = records[frame['frame_index']]
             frame['channels'][channel] = record
-            problems += record['status'] == 'unmatched'
+            problems += record['status'] in ('unmatched', 'failed')
     if args.dry_run:
         print(f'Dry run complete; {problems} unmatched/failed association(s); no files written.')
     else:
         args.aligned_root.mkdir(parents=True, exist_ok=True)
-        manifest = dict(schema_version=1, product='gris_sdo_registered_associations',
+        manifest = dict(schema_version=2, product='gris_sdo_registered_associations',
                         raw_root=str(args.raw_root.resolve()), gris_wcs=relative_path(headers_dir, args.aligned_root),
-                        max_time_delta_seconds=args.max_time_delta, channels=channels, frames=frames,
-                        observations=observations)
+                        timestamps_csv=str(args.timestamps.resolve()),
+                        max_time_delta_seconds=args.max_time_delta, channels=channels, frames=frames)
         manifest_path = args.aligned_root / 'alignment.json'
         temporary = manifest_path.with_suffix('.json.tmp')
         temporary.write_text(json.dumps(manifest, indent=2) + '\n')
