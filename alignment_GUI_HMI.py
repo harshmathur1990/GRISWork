@@ -510,7 +510,7 @@ if __name__ == '__main__':
 
     plt.switch_backend('QtAgg')
 
-    base_path = Path('/mnt/f/GRIS')
+    base_path = Path('/mn/stornext/d9/data/harshm/GRISData')
 
     filename = '25Apr25ARM1-003.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits'
 
