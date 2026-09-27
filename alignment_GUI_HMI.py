@@ -1,32 +1,26 @@
+"""Interactively fit GRIS positions and persist WCS plus full registered HMI maps."""
+import json
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button, TextBox
-import sunpy.io
-import matplotlib.pyplot as plt
-from pathlib import Path
-from matplotlib.gridspec import GridSpec
-from matplotlib.ticker import MultipleLocator
-from pathlib import Path
-import matplotlib
-from scipy.stats import pearsonr
-from skimage.registration import phase_cross_correlation
-from scipy.ndimage import shift
-from scipy.signal import fftconvolve
-import scipy
-from scipy.interpolate import RectBivariateSpline
-from tqdm import tqdm
-from scipy.ndimage import zoom
-from datetime import datetime
-from aiapy.calibrate import register
-from datetime import timedelta, timezone
+import sunpy.map
+from sunpy.util.metadata import MetaDict
 from astropy import units as u
 import astropy.coordinates
-import sys
-import time
-from sunpy.util.metadata import MetaDict
+from astropy.time import Time
+from astropy.io import fits
+from astropy.wcs.utils import pixel_to_pixel
+from aiapy.calibrate import register
+from scipy.ndimage import map_coordinates
+from scipy.stats import pearsonr
+from tqdm import tqdm
 
-
-plt.switch_backend('QtAgg')
+from hmi_alignment import load_timestamps, get_closest
 
 
 def get_upsampled_image(image, factor):
@@ -35,23 +29,13 @@ def get_upsampled_image(image, factor):
 
     ny, nx = image.shape
 
-    # Original grid
-    y = np.arange(ny)
-    x = np.arange(nx)
-
-    # Spline interpolator
-    spline = RectBivariateSpline(y, x, image, kx=1, ky=1)
-
-    # New grid
-    new_ny = int(np.round(ny * factor))
-    new_nx = int(np.round(nx * factor))
-    y_new = np.linspace(0, ny - 1, new_ny)
-    x_new = np.linspace(0, nx - 1, new_nx)
-
-    # Evaluate the spline on new grid
-    zoomed_image = spline(y_new, x_new)
-
-    return zoomed_image
+    # Preserve native pixel centres and footprint under integer upsampling.
+    new_ny, new_nx = int(round(ny * factor)), int(round(nx * factor))
+    y, x = np.meshgrid((np.arange(new_ny) + 0.5) / factor - 0.5,
+                       (np.arange(new_nx) + 0.5) / factor - 0.5,
+                       indexing='ij')
+    return map_coordinates(np.asarray(image, dtype=float), [y, x],
+                           order=1, mode='nearest')
 
 
 def get_orig_image(data, time, wave, subpixel_accuracy=1):
@@ -74,7 +58,9 @@ def get_correlation_value(
 
     region2 = region2[2:, 2:]
 
-    mask = ~np.isnan(region1) & ~np.isnan(region2)
+    mask = np.isfinite(region1) & np.isfinite(region2)
+    if mask.sum() < 2:
+        return np.nan
     corr = np.round(pearsonr(region1[mask].flatten(), region2[mask].flatten()).statistic, 4)
 
     return corr
@@ -98,86 +84,47 @@ def downsample_sunpy_map(map_in, factor):
     new_meta['NAXIS2'] = new_data.shape[0]
     new_meta['CDELT1'] *= factor
     new_meta['CDELT2'] *= factor
-    new_meta['CRPIX1'] /= factor
-    new_meta['CRPIX2'] /= factor
+    new_meta['CRPIX1'] = (new_meta['CRPIX1'] - 0.5) / factor + 0.5
+    new_meta['CRPIX2'] = (new_meta['CRPIX2'] - 0.5) / factor + 0.5
 
     return sunpy.map.Map(new_data, new_meta)
 
 
-def get_closest(exact_date, cadence, time, fits_datetimes):
-    target_datetime = exact_date + timedelta(seconds=cadence * time)
-
-    closest = min(fits_datetimes, key=lambda x: abs(x[0] - target_datetime))
-
-    closest_datetime, closest_file = closest
-
-    return closest_datetime, closest_file
-
-
-def extract_submap_with_metadata(aia_map, xc, yc, dx, dy, onx, ony, in_scale=0.6, out_scale=0.005):
-
-    data = aia_map.data
-    ny, nx = data.shape
+def gris_map(image, registered, xc, yc):
+    """Attach the fitted solar WCS to the native GRIS pixel grid."""
+    centre = astropy.coordinates.SkyCoord(xc * u.arcsec, yc * u.arcsec,
+                                          frame=registered.coordinate_frame)
+    header = sunpy.map.make_fitswcs_header(
+        image, centre, scale=[0.135, 0.135] * u.arcsec / u.pix)
+    return sunpy.map.Map(image, header)
 
 
-    crpix1 = aia_map.meta['crpix1']  # 1-based
-    crpix2 = aia_map.meta['crpix2']
-
-    # Input arcsec grid
-    x_vals = (np.arange(nx) - (crpix1 - 1)) * in_scale
-    y_vals = (np.arange(ny) - (crpix2 - 1)) * in_scale
-
-    # Construct output coordinate arrays WITHOUT exceeding given half-widths
-    x_start = xc - dx
-    x_end   = xc + dx
-    y_start = yc - dy
-    y_end   = yc + dy
-
-
-    x_new = np.arange(xc-dx, xc+dx, out_scale)[0:onx]
-    y_new = np.arange(yc-dy, yc+dy, out_scale)[0:ony]
-
-    data[np.where(np.isnan(data))] = 0
-    # Interpolate
-    rbs = RectBivariateSpline(y_vals, x_vals, data, kx=1, ky=1)
-    sub_data = rbs(y_new, x_new)
-
-    # Update metadata
-    new_meta = MetaDict(aia_map.meta.copy())
-    new_meta['naxis1'] = len(x_new)
-    new_meta['naxis2'] = len(y_new)
-    new_meta['crpix1'] = np.round((xc - x_new[0]) / out_scale, 4) + 1
-    new_meta['crpix2'] = np.round((yc - y_new[0]) / out_scale, 4) + 1
-    new_meta['crval1'] = xc
-    new_meta['crval2'] = yc
-    new_meta['cdelt1'] = out_scale
-    new_meta['cdelt2'] = out_scale
-
-    return sunpy.map.Map(sub_data, new_meta)
-
-
-def get_hmi_submap(
-    aia_map, image, init_x, init_y
-):
-
-    spread_x = image.shape[1] * 0.135 / 2
-
-    spread_y = image.shape[0] * 0.135 / 2
-
-    onx = int(spread_x * 2 / 0.005)
-
-    ony = int(spread_y * 2 / 0.005)
-
-    resampled_submap = extract_submap_with_metadata(aia_map, init_x, init_y, spread_x, spread_y, onx, ony, in_scale=0.6, out_scale=0.005)
-
-    return resampled_submap
+def get_hmi_submap(registered, image, init_x, init_y, factor=27):
+    native = gris_map(image, registered, init_x, init_y)
+    header = native.meta.copy()
+    for axis in (1, 2):
+        header[f'crpix{axis}'] = (header[f'crpix{axis}'] - 0.5) * factor + 0.5
+        header[f'cdelt{axis}'] /= factor
+        header[f'naxis{axis}'] *= factor
+    shape = (image.shape[0] * factor, image.shape[1] * factor)
+    grid = sunpy.map.Map(np.zeros(shape), header)
+    y, x = np.indices(shape, dtype=float)
+    hx, hy = pixel_to_pixel(grid.wcs, registered.wcs, x, y)
+    sampled = map_coordinates(np.asarray(registered.data, dtype=float), [hy, hx],
+                              order=1, mode='constant', cval=np.nan)
+    return sunpy.map.Map(sampled, header)
 
 
 def animate(
     base_path, filename, hmi_path, hmi_write_path,
-    exact_date, cadence=44, subpixel_target=0.005
+    timestamps_path, subpixel_target=0.005, save_crops=False
 ):
 
+    if not np.isfinite(subpixel_target) or subpixel_target <= 0:
+        raise ValueError("subpixel_target must be finite and positive")
+    factor = int(round(0.135 / subpixel_target))
+    if factor < 1 or not np.isclose(factor * subpixel_target, 0.135):
+        raise ValueError("subpixel_target must divide the native 0.135 arcsec scale")
     time = [0]
 
     init_x = [0]
@@ -194,7 +141,7 @@ def animate(
         aia_map = None
 
         if closest_file.name not in aia_map_dict:
-            hmi_data, hmi_header = sunpy.io.read_file(closest_file)[1]
+            hmi_data, hmi_header = fits.getdata(closest_file, ext=1, header=True)
 
             hmi_map = sunpy.map.Map(hmi_data, hmi_header)
 
@@ -233,33 +180,30 @@ def animate(
 
     hmi_file_list = list(hmi_path.glob("*.fits"))
 
-    # Extract UTC datetime from filenames
+    # JSOC filename clocks explicitly labelled TAI must be converted to UTC.
     fits_datetimes = []
-    for hmi_file in hmi_file_list:
-        name = hmi_file.name
-        try:
-            # Extract date and time from filename
-            date_str = name.split('.')[2] + name.split('.')[3]  # e.g., '20250425' + '090815'
-            date_str = date_str[:-5]
-            dt = datetime.strptime(date_str, "%Y%m%d_%H%M%S")
-            dt_utc = dt.replace(tzinfo=timezone.utc)  # make it timezone-aware in UTC
-            fits_datetimes.append((dt_utc, hmi_file))
-        except Exception as e:
-            print (e)  # Skip malformed filenames
-            sys.exit(-1)
+    for hmi_file in sorted(hmi_file_list):
+        match = re.search(r"(\d{8})_(\d{6})_TAI", hmi_file.name)
+        if not match:
+            raise ValueError(f"Unrecognized HMI timestamp: {hmi_file.name}")
+        dt = datetime.strptime(''.join(match.groups()), "%Y%m%d%H%M%S")
+        dt_utc = Time(dt, scale='tai').utc.to_datetime(timezone=timezone.utc)
+        fits_datetimes.append((dt_utc, hmi_file))
 
-    data, _ = sunpy.io.read_file(base_path / filename)[0]
+    data = fits.getdata(base_path / filename, ext=0)
+    timestamps = load_timestamps(timestamps_path, data.shape[0] if data.ndim == 5 else 1)
+    set_val(0, init_x[0], init_y[0], wave[0])
 
-    closest_datetime, closest_file = get_closest(exact_date, cadence, time[0], fits_datetimes)
+    closest_datetime, closest_file = get_closest(timestamps[time[0]], fits_datetimes)
 
     aia_map = get_aia_map(closest_file)
 
     image = get_orig_image(data, time[0], wave[0])
 
-    upsampled_image = get_upsampled_image(image, 0.135/0.005)
+    upsampled_image = get_upsampled_image(image, factor)
 
     resampled_submap = get_hmi_submap(
-        aia_map, image, init_x[0], init_y[0]
+        aia_map, image, init_x[0], init_y[0], factor
     )    
 
     final_image_1 = [upsampled_image]
@@ -274,14 +218,9 @@ def animate(
 
     matplotlib.rc('font', **font)
 
-    fig, axs = plt.subplots(2, 1, figsize=(7, 9))
-
-    extent = [
-        (1 - aia_map.meta['crpix1']) * 0.6,  (aia_map.data.shape[0] - aia_map.meta['crpix1']) * 0.6,
-        (1 - aia_map.meta['crpix1']) * 0.6,  (aia_map.data.shape[0] - aia_map.meta['crpix1']) * 0.6
-    ]
-
-    im0 = axs[0].imshow(aia_map.data, cmap='gray', origin='lower', extent=extent)
+    fig = plt.figure(figsize=(7, 9))
+    axs = [fig.add_subplot(211, projection=aia_map), fig.add_subplot(212)]
+    im0 = aia_map.plot(axes=axs[0], cmap='gray')
 
     im = axs[1].imshow(final_image_1[0], cmap='gray', origin='lower')
 
@@ -403,22 +342,22 @@ def animate(
 
         u_init_x, u_init_y, u_wave = get_val(time[0])
 
-        print ('{} | {} | {} | {}'.format(time[0], u_init_x, u_init_y, u_wave))
+        init_x[0], init_y[0], wave[0] = u_init_x, u_init_y, u_wave
 
         init_x_textbox.set_val(str(u_init_x))
 
         init_y_textbox.set_val(str(u_init_y))
 
-        closest_datetime, closest_file = get_closest(exact_date, cadence, time[0], fits_datetimes)
+        closest_datetime, closest_file = get_closest(timestamps[time[0]], fits_datetimes)
 
         aia_map = get_aia_map(closest_file)
 
         image = get_orig_image(data, time[0], u_wave)
 
-        upsampled_image = get_upsampled_image(image, 0.135/0.005)
+        upsampled_image = get_upsampled_image(image, factor)
 
         resampled_submap = get_hmi_submap(
-            aia_map, image, u_init_x, u_init_y
+            aia_map, image, u_init_x, u_init_y, factor
         )
 
         final_image_1 = [upsampled_image]
@@ -442,6 +381,8 @@ def animate(
             'F2: {}'.format(closest_file.name)
         )
 
+        axs[0].reset_wcs(aia_map.wcs)
+        im0.set_extent((-0.5, aia_map.data.shape[1] - 0.5, -0.5, aia_map.data.shape[0] - 0.5))
         im0.set_array(aia_map.data)
         mn, mx = np.nanmin(aia_map.data) * 0.9, np.nanmax(aia_map.data) * 1.1
         im0.set_clim(mn, mx)
@@ -451,7 +392,7 @@ def animate(
         axs[0].draw_artist(w_text)
         axs[0].draw_artist(corr_text)
         axs[0].draw_artist(f2_text)
-        fig.canvas.blit(axs[0].bbox)
+        fig.canvas.draw_idle()
 
         timer.stop()
         timer.callbacks = []
@@ -459,49 +400,53 @@ def animate(
         timer.start()
 
     def do_save(event):
-        list_t = list(range(0, t_max, 1))
+        missing = [i for i in range(t_max + 1) if i not in val_dict]
+        if missing:
+            print(f"Please align the remaining frame indices: {missing}")
+            return
+        hmi_write_path.mkdir(parents=True, exist_ok=True)
+        registered_dir = hmi_write_path / 'registered'
+        gris_dir = hmi_write_path / 'gris_wcs'
+        registered_dir.mkdir(exist_ok=True)
+        gris_dir.mkdir(exist_ok=True)
+        records, saved = [], set()
+        for a_t in tqdm(range(t_max + 1), desc="Saving alignment"):
+            xc, yc, wavelength = get_val(a_t)
+            matched_time, source = get_closest(timestamps[a_t], fits_datetimes)
+            registered = get_aia_map(source)
+            registered_path = registered_dir / source.name
+            if source not in saved:
+                registered.save(registered_path, overwrite=True)
+                saved.add(source)
+            image = get_orig_image(data, a_t, wavelength)
+            aligned = gris_map(image, registered, xc, yc)
+            aligned.meta['grisdate'] = timestamps[a_t].isoformat()
+            aligned.meta['grisidx'] = a_t
+            aligned.meta['griswave'] = wavelength
+            gris_path = gris_dir / f'gris_{a_t:04d}.fits'
+            aligned.save(gris_path, overwrite=True)
+            crop_name = None
+            if save_crops:
+                crop = downsample_sunpy_map(
+                    get_hmi_submap(registered, image, xc, yc, factor), factor)
+                crop_name = f'gris_{a_t:04d}_{source.name}'
+                crop.save(hmi_write_path / crop_name, overwrite=True)
+            records.append(dict(
+                frame_index=a_t, series_index=a_t + 1,
+                timestamp_utc=timestamps[a_t].isoformat(),
+                hmi_timestamp_utc=matched_time.isoformat(),
+                hmi_minus_gris_seconds=(matched_time - timestamps[a_t]).total_seconds(),
+                source_hmi=str(source.resolve()),
+                registered_hmi=str(registered_path.relative_to(hmi_write_path)),
+                gris_map=str(gris_path.relative_to(hmi_write_path)),
+                crop=crop_name, centre_arcsec=[xc, yc], wavelength_index=wavelength))
+        manifest = dict(schema_version=1, source_gris=str((base_path / filename).resolve()),
+                        timestamps_csv=str(Path(timestamps_path).resolve()),
+                        native_scale_arcsec=0.135, frames=records)
+        (hmi_write_path / 'alignment.json').write_text(json.dumps(manifest, indent=2) + '\n')
 
-        not_done_t = list()
-
-        for a_t in list_t:
-            if a_t not in val_dict:
-                not_done_t_max.append(a_t)
-
-        if len(not_done_t) > 0:
-            print (
-                "Please align for the remaining times : {}".format(
-                    ', '.join([str(x) for x in not_done_t])
-                )
-            )
-        else:
-
-            with tqdm(total=t_max, desc="Saving data") as pbar:
-                for a_t in list_t:
-                    u_init_x, u_init_y, u_wave = get_val(a_t)
-
-                    closest_datetime, closest_file = get_closest(exact_date, cadence, a_t, fits_datetimes)
-
-                    aia_map = get_aia_map(closest_file)
-
-                    image = get_orig_image(data, a_t, u_wave)
-
-                    resampled_submap = get_hmi_submap(
-                        aia_map, image, u_init_x, u_init_y
-                    )
-
-                    downsampled_map = downsample_sunpy_map(resampled_submap, 27)
-
-                    sunpy.io.write_file(
-                        hmi_write_path / closest_file.name,
-                        downsampled_map.data,
-                        downsampled_map.meta,
-                        overwrite=True
-                    )
-
-                    pbar.update(1)
-    
     def update_wave(val):
-        wave[0] = val
+        wave[0] = int(val)
         set_val(
             time[0],
             init_x[0],
@@ -511,14 +456,16 @@ def animate(
         update_timer()
 
     def update_time(val):
-        time[0] = val
+        time[0] = int(val)
         update_timer()
 
     def on_click_im0(event):
         if event.inaxes != axs[0]:
             return
 
-        x, y = float(event.xdata), float(event.ydata)
+        _, source = get_closest(timestamps[time[0]], fits_datetimes)
+        coord = get_aia_map(source).pixel_to_world(event.xdata * u.pix, event.ydata * u.pix)
+        x, y = coord.Tx.to_value(u.arcsec), coord.Ty.to_value(u.arcsec)
 
         x, y = np.round(x, 2), np.round(y, 2)
         init_x[0] = x
@@ -561,7 +508,7 @@ def animate(
 
 if __name__ == '__main__':
 
-    exact_date = '2025-04-25T09:08:00+0000'
+    plt.switch_backend('QtAgg')
 
     base_path = Path('/mnt/f/GRIS')
 
@@ -571,8 +518,6 @@ if __name__ == '__main__':
 
     hmi_write_path = base_path / 'aligned_SDO' / 'HMI' / 'Continuum'
 
-    exact_date = '2025-04-25T09:08:00+0000'
-
-    exact_date = datetime.strptime(exact_date, '%Y-%m-%dT%H:%M:%S%z')
-
-    animate(base_path, filename, hmi_path, hmi_write_path, exact_date, cadence=44, subpixel_target=0.005)
+    timestamps_path = Path(__file__).with_name('serie_timestamps.csv')
+    animate(base_path, filename, hmi_path, hmi_write_path, timestamps_path,
+            subpixel_target=0.005, save_crops=False)

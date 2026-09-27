@@ -23,6 +23,14 @@ python inversion_viewer.py \
   --timestamps serie_timestamps.csv --rows 2 --columns 3
 ```
 
+```
+py inversion_viewer.py \
+  --observation /mn/stornext/d9/data/harshm/GRISData/spectralveil_corrected_25Apr25ARM2-003.fits_squarred_pixels.fits_aligned_downsampled_streamed.fits \
+  --atmosphere /mn/stornext/d9/data/harshm/fulldata_inversions/combined_output_atmos_cycle_B_3.nc \
+  --profiles /mn/stornext/d9/data/harshm/fulldata_inversions/combined_output_profs_cycle_B_3.nc \
+  --aligned-root /mn/stornext/d9/data/harshm/GRISData/aligned_SDO \
+  --timestamps serie_timestamps.csv --rows 2 --columns 3
+```
 - Choose rows and columns, then **Apply grid**. Existing panels retain settings
   in row-major order; shrinking removes the trailing panels.
 - Choose a timestamp or drag the shared slider. **Play/Pause**, previous/next,
