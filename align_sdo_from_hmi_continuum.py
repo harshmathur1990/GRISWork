@@ -10,7 +10,7 @@ written. Source observation times and registered WCS remain intact.
 
 Example:
     python align_sdo_from_hmi_continuum.py \\
-        --raw-root /mnt/f/GRIS/SDO --aligned-root /mnt/f/GRIS/aligned_SDO
+        --raw-root /mn/stornext/d9/data/harshm/GRISData/SDO --aligned-root /mn/stornext/d9/data/harshm/GRISData/aligned_SDO
 """
 from __future__ import annotations
 
@@ -208,9 +208,9 @@ def process_channel(channel: str, references: Sequence[GrisReference], raw_root:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--raw-root', type=Path, default=Path('/mnt/f/GRIS/SDO'),
+    parser.add_argument('--raw-root', type=Path, default=Path('/mn/stornext/d9/data/harshm/GRISData/SDO'),
                         help='Raw SDO root containing HMI/ and AIA/')
-    parser.add_argument('--aligned-root', type=Path, default=Path('/mnt/f/GRIS/aligned_SDO'),
+    parser.add_argument('--aligned-root', type=Path, default=Path('/mn/stornext/d9/data/harshm/GRISData/aligned_SDO'),
                         help='Output root for alignment.json and channel/registered/ directories')
     parser.add_argument('--gris-wcs', type=Path,
                         help='GRIS .hdr directory (default: <aligned-root>/HMI/Continuum/gris_wcs)')
