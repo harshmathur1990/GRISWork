@@ -23,6 +23,8 @@ class ImagePanel(QtWidgets.QGroupBox):
         self.contours = []
         self.boundary = None
         self.limits = None
+        self.navigation_callbacks = []
+        self.sdo_wcs = None
         layout = QtWidgets.QVBoxLayout(self)
         self.source = QtWidgets.QComboBox()
         self.source.addItems(self.store.sources)
@@ -80,7 +82,8 @@ class ImagePanel(QtWidgets.QGroupBox):
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.canvas.setMinimumSize(260, 200)
         self.ax = self.figure.add_subplot(111)
-        layout.addWidget(NavigationToolbar2QT(self.canvas, self))
+        self.toolbar = NavigationToolbar2QT(self.canvas, self)
+        layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas, 1)
         self.detail = QtWidgets.QLabel()
         self.detail.setWordWrap(True)
@@ -164,7 +167,14 @@ class ImagePanel(QtWidgets.QGroupBox):
         self.overlay_artist.set_visible(not self.overlay_artist.get_visible())
         self.canvas.draw_idle()
 
+    def disconnect_navigation(self):
+        for callback in self.navigation_callbacks:
+            self.ax.callbacks.disconnect(callback)
+        self.navigation_callbacks.clear()
+        self.sdo_wcs = None
+
     def render(self, *_):
+        self.disconnect_navigation()
         source = self.source.currentText()
         resume_flicker = self.flicker.isChecked()
         was_running = self.flicker_timer.isActive()
@@ -236,18 +246,29 @@ class ImagePanel(QtWidgets.QGroupBox):
             if source == 'Atmosphere':
                 title = f'{self.parameter.currentText()} | log τ ≈ {self.coordinate.value():.3f}'
             elif source.startswith('SDO:'):
-                title = source + ' | Full disk'
+                title = source
             else:
                 title = f'{source} {self.stokes.currentText()} | λ {self.coordinate.value():.4f} Å'
             self.ax.set_title(title, fontsize=10)
             self.detail.setText(detail)
             self.detail.setStyleSheet('')
+            self.toolbar.update()
+            # Home remains the native full-image view after axes are rebuilt.
+            self.toolbar.push_current()
+            if source.startswith('SDO:'):
+                self.sdo_wcs = view.wcs
+                self.viewer.apply_sdo_view(self)
+                self.toolbar.push_current()
+                self.navigation_callbacks = [
+                    self.ax.callbacks.connect(event, lambda ax: self.viewer.sync_sdo_view(self))
+                    for event in ('xlim_changed', 'ylim_changed')]
             if resume_flicker:
                 if was_running and self.overlay_artist is not None:
                     self.overlay_artist.set_visible(overlay_phase)
                 else:
                     self.toggle_flicker(True)
         except Exception as exc:
+            self.disconnect_navigation()
             self.stop_flicker()
             if self.artist is not None:
                 self.artist.set_visible(False)
@@ -279,6 +300,8 @@ class ComparisonWidget(QtWidgets.QWidget):
         self.store = store
         self.time_index = 0
         self.panels = []
+        self.sdo_view = None
+        self.syncing_sdo = False
         outer = QtWidgets.QVBoxLayout(self)
         grid_bar = QtWidgets.QHBoxLayout()
         outer.addLayout(grid_bar)
@@ -291,9 +314,6 @@ class ComparisonWidget(QtWidgets.QWidget):
         apply = QtWidgets.QPushButton('Apply grid')
         apply.clicked.connect(self.rebuild_grid)
         grid_bar.addWidget(apply)
-        self.export_button = QtWidgets.QPushButton('Export View…')
-        self.export_button.clicked.connect(self.export_widget)
-        grid_bar.addWidget(self.export_button)
         self.time_mode = QtWidgets.QComboBox()
         self.time_mode.addItem('SDO: saved match / nearest UTC', 'utc')
         grid_bar.addWidget(self.time_mode)
@@ -345,59 +365,48 @@ class ComparisonWidget(QtWidgets.QWidget):
             outer.addWidget(warning)
         self.rebuild_grid()
 
-    def export_widget(self):
-        from inversion_viewer_export import ExportCancelled, export_view, snapshot_view
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, 'Export selected panels and all time frames', 'shared_gris_view.py', 'Python viewer (*.py)')
-        if not path:
+    def sync_sdo_view(self, panel):
+        """Share numerical helioprojective angles, including off-limb regions.
+
+        Avoid observer/time transformations: navigation selects a sky region,
+        not a solar surface feature to propagate in time.
+        """
+        if self.syncing_sdo or panel.sdo_wcs is None:
             return
-        destination = Path(path)
-        if destination.suffix.lower() != '.py':
-            destination = destination.with_name(destination.name + '.py')
-        was_playing = self.play.isChecked()
-        flickering = [panel.flicker.isChecked() for panel in self.panels]
-        progress = None
+        x0, x1 = panel.ax.get_xlim()
+        y0, y1 = panel.ax.get_ylim()
+        t = np.linspace(0, 1, 17)
+        x = np.concatenate((x0 + t*(x1-x0), np.full_like(t, x1),
+                            x1 - t*(x1-x0), np.full_like(t, x0)))
+        y = np.concatenate((np.full_like(t, y0), y0 + t*(y1-y0),
+                            np.full_like(t, y1), y1 - t*(y1-y0)))
+        world = panel.sdo_wcs.pixel_to_world_values(x, y)
+        angles = tuple((values * u.Unit(unit)).to_value(u.deg)
+                       for values, unit in zip(world, panel.sdo_wcs.world_axis_units))
+        if not all(np.isfinite(values).all() for values in angles):
+            return
+        self.sdo_view = angles
+        self.syncing_sdo = True
         try:
-            # Snapshot before pausing so the exported flicker state is retained.
-            snapshot = snapshot_view(self)
-            self.play.setChecked(False)
-            for panel in self.panels:
-                panel.stop_flicker()
-            total = len(self.panels) * self.store.nt
-            progress = QtWidgets.QProgressDialog('Preparing export…', 'Cancel', 0, total, self)
-            progress.setWindowTitle('Export View')
-            progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
-            progress.setMinimumDuration(0)
-            progress.setAutoClose(False)
-            progress.setAutoReset(False)
-            progress.show()
-            def update(done, total, message):
-                progress.setLabelText(message)
-                progress.setValue(done)
-                QtWidgets.QApplication.processEvents()
-                return not progress.wasCanceled()
-            result = export_view(self.store, snapshot, destination, update)
-            progress.close()
-            message = (f'Saved {result["panels"]} panels × {result["times"]} time frames '
-                       f'({result["bytes"] / 1024**2:.1f} MiB).\n\n'
-                       f'{destination}\n\nSend this one file. The recipient needs Python plus '
-                       'numpy, astropy, matplotlib and PySide6-Essentials.\n'
-                       'Full-disk SDO images remain full resolution; only selected slices are included.')
-            if result['unavailable']:
-                message += f'\n{result["unavailable"]} unavailable panel/time entries are preserved as blank panels with messages.'
-            QtWidgets.QMessageBox.information(self, 'View exported', message)
-        except ExportCancelled:
-            pass
-        except Exception as error:
-            QtWidgets.QMessageBox.critical(self, 'Export failed', str(error))
+            for other in self.panels:
+                if other is not panel:
+                    self.apply_sdo_view(other)
         finally:
-            if progress is not None:
-                progress.close()
-            for panel, enabled in zip(self.panels, flickering):
-                if enabled:
-                    panel.flicker.setChecked(True)
-            if was_playing:
-                self.play.setChecked(True)
+            self.syncing_sdo = False
+
+    def apply_sdo_view(self, panel):
+        if panel.sdo_wcs is None or self.sdo_view is None:
+            return
+        world = tuple((values * u.deg).to_value(u.Unit(unit))
+                      for values, unit in zip(self.sdo_view, panel.sdo_wcs.world_axis_units))
+        x, y = panel.sdo_wcs.world_to_pixel_values(*world)
+        if not (np.isfinite(x).all() and np.isfinite(y).all()):
+            return
+        # Suppress callbacks on followers, avoiding recursive synchronization
+        # and enlargement from repeatedly bounding rotated image coordinates.
+        panel.ax.set_xlim(float(np.min(x)), float(np.max(x)), emit=False)
+        panel.ax.set_ylim(float(np.min(y)), float(np.max(y)), emit=False)
+        panel.canvas.draw_idle()
 
     def rebuild_grid(self):
         count = self.rows.value() * self.columns.value()
@@ -405,6 +414,7 @@ class ComparisonWidget(QtWidgets.QWidget):
             panel = self.panels.pop()
             self.grid.removeWidget(panel)
             panel.stop_flicker()
+            panel.disconnect_navigation()
             panel.deleteLater()
         while len(self.panels) < count:
             panel = ImagePanel(self, len(self.panels) + 1)
