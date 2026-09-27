@@ -3,3 +3,5 @@ h5py>=3.8
 astropy>=5.3
 matplotlib>=3.7
 PySide6-Essentials>=6.5
+scipy>=1.10
+sunpy[map]>=5.0

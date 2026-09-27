@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 
 import numpy as np
+from astropy import units as u
+from astropy.wcs.utils import pixel_to_pixel
 from PySide6 import QtCore, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
@@ -17,6 +19,9 @@ class ImagePanel(QtWidgets.QGroupBox):
         self.viewer = viewer
         self.store = viewer.store
         self.artist = self.colorbar = None
+        self.overlay_artist = None
+        self.contours = []
+        self.boundary = None
         self.limits = None
         layout = QtWidgets.QVBoxLayout(self)
         self.source = QtWidgets.QComboBox()
@@ -27,6 +32,14 @@ class ImagePanel(QtWidgets.QGroupBox):
         settings.setText('Settings')
         settings.setCheckable(True)
         source_row.addWidget(settings)
+        self.flicker = QtWidgets.QPushButton('Flicker GRIS')
+        self.flicker.setCheckable(True)
+        self.flicker.setEnabled(False)
+        source_row.addWidget(self.flicker)
+        self.flicker_timer = QtCore.QTimer(self)
+        self.flicker_timer.setInterval(500)
+        self.flicker_timer.timeout.connect(self.flicker_tick)
+        self.flicker.toggled.connect(self.toggle_flicker)
         layout.addLayout(source_row)
         settings_host = QtWidgets.QWidget()
         controls = QtWidgets.QGridLayout(settings_host)
@@ -86,6 +99,9 @@ class ImagePanel(QtWidgets.QGroupBox):
 
     def configure(self, *_):
         source = self.source.currentText()
+        sdo = source.startswith('SDO:')
+        self.stop_flicker()
+        self.flicker.setEnabled(sdo)
         spectral = source in ('Observation', 'Fitted profiles')
         atmosphere = source == 'Atmosphere'
         self.parameter.setEnabled(atmosphere)
@@ -96,15 +112,16 @@ class ImagePanel(QtWidgets.QGroupBox):
         self.stokes.addItems(list('IQUV')[:count])
         self.stokes.blockSignals(False)
         self.stokes.setEnabled(spectral)
-        self.index.setEnabled(spectral or atmosphere)
-        self.coordinate.setEnabled(spectral or atmosphere)
-        self.index_label.setText('Depth index (0-based)' if atmosphere else 'Wavelength index (0-based)')
-        self.coordinate_label.setText('log τ₅₀₀ at [t=0,y=0,x=0]' if atmosphere else 'λ [Å], nearest sample')
-        self.coordinate.setToolTip('Depth indices select the same layer at every pixel. The displayed log τ is from the first pixel.')
+        self.index.setEnabled(spectral or atmosphere or sdo)
+        self.coordinate.setEnabled(spectral or atmosphere or sdo)
+        self.index_label.setText('Depth sample' if atmosphere else 'GRIS overlay wavelength sample' if sdo else 'Wavelength sample')
+        self.coordinate_label.setText('log τ₅₀₀ (reference location)' if atmosphere else
+                                      'GRIS overlay λ [Å]' if source.startswith('SDO:') else 'λ [Å], nearest sample')
+        self.coordinate.setToolTip('Depth indices select the same layer everywhere; log τ uses the reference location.')
         coords = self.store.coordinates(source)
         self.index.blockSignals(True)
         self.index.setRange(0, len(coords) - 1)
-        target = -1 if atmosphere else 8542.09
+        target = -1 if atmosphere else coords[0] if sdo else 8542.09
         self.index.setValue(int(np.argmin(abs(coords - target))))
         self.index.blockSignals(False)
         self.index_changed()
@@ -122,16 +139,44 @@ class ImagePanel(QtWidgets.QGroupBox):
         self.limits = None
         self.render()
 
+    def stop_flicker(self):
+        self.flicker_timer.stop()
+        self.flicker.blockSignals(True)
+        self.flicker.setChecked(False)
+        self.flicker.blockSignals(False)
+        self.flicker.setText('Flicker GRIS')
+        if self.overlay_artist is not None:
+            self.overlay_artist.set_visible(False)
+
+    def toggle_flicker(self, enabled):
+        if enabled and self.overlay_artist is not None and self.artist.get_visible():
+            self.overlay_artist.set_visible(True)
+            self.flicker.setText('Stop flicker')
+            self.flicker_timer.start()
+        else:
+            self.stop_flicker()
+        self.canvas.draw_idle()
+
+    def flicker_tick(self):
+        if self.overlay_artist is None or not self.artist.get_visible():
+            self.stop_flicker()
+            return
+        self.overlay_artist.set_visible(not self.overlay_artist.get_visible())
+        self.canvas.draw_idle()
+
     def render(self, *_):
         source = self.source.currentText()
+        resume_flicker = self.flicker.isChecked()
+        was_running = self.flicker_timer.isActive()
+        overlay_phase = self.overlay_artist is not None and self.overlay_artist.get_visible()
         try:
-            data, unit, detail = self.store.image(
+            view = self.store.display(
                 source, self.viewer.time_index, self.index.value(), self.stokes.currentIndex(),
-                self.parameter.currentText(), self.viewer.time_mode.currentData(),
-                self.viewer.tolerance.value())
+                self.parameter.currentText(), self.viewer.tolerance.value())
+            data, unit, detail = view.data, view.unit, view.detail
             finite = data[np.isfinite(data)]
             if not finite.size:
-                raise ValueError('This slice has no finite pixels.')
+                raise ValueError('This slice has no finite data in the requested field.')
             mode = self.scaling.currentIndex()
             self.low.setEnabled(mode == 2)
             self.high.setEnabled(mode == 2)
@@ -149,37 +194,88 @@ class ImagePanel(QtWidgets.QGroupBox):
             if mode != 2:
                 self.low.setText(f'{limits[0]:.6g}')
                 self.high.setText(f'{limits[1]:.6g}')
-            if self.artist is None:
-                self.artist = self.ax.imshow(data, origin='lower', interpolation='nearest',
-                                             cmap=self.cmap.currentText(), vmin=limits[0], vmax=limits[1])
-                self.colorbar = self.figure.colorbar(self.artist, ax=self.ax)
-                self.ax.set_xlabel('x [pixel]')
-                self.ax.set_ylabel('y [pixel]')
-            else:
-                self.artist.set_data(data)
-                self.artist.set_visible(True)
-                self.artist.set_cmap(self.cmap.currentText())
-                self.artist.set_clim(*limits)
-                self.colorbar.ax.set_visible(True)
+            # Rebuild for this frame's WCS and shape; never retain stale contours.
+            self.figure.clear()
+            self.ax = self.figure.add_subplot(111, projection=view.wcs)
+            if view.absolute:
+                self.ax.coords[0].set_coord_type('longitude', coord_wrap=180 * u.deg)
+                self.ax.coords[1].set_coord_type('latitude')
+            for i, label in enumerate(('Solar X [arcsec]', 'Solar Y [arcsec]') if view.absolute
+                                      else ('ΔX from GRIS centre [arcsec]', 'ΔY from GRIS centre [arcsec]')):
+                self.ax.coords[i].set_format_unit(u.arcsec)
+                self.ax.coords[i].set_major_formatter('s.s' if view.absolute else 'x.x')
+                self.ax.coords[i].set_axislabel(label)
+                self.ax.coords[i].set_ticks(number=4)
+                self.ax.coords[i].set_ticklabel(size=8, exclude_overlapping=True)
+            self.ax.format_coord = lambda x, y: self.world_readout(view.wcs, x, y, view.absolute)
+            self.artist = self.ax.imshow(data, origin='lower', interpolation='nearest',
+                                         cmap=self.cmap.currentText(), vmin=limits[0], vmax=limits[1])
+            self.colorbar = self.figure.colorbar(self.artist, ax=self.ax)
             self.colorbar.set_label(unit)
+            self.contours, self.boundary, self.overlay_artist = [], None, None
+            if view.gris_data is not None:
+                # Images share the display WCS; transparent GRIS exterior keeps SDO context.
+                values = view.gris_data[np.isfinite(view.gris_data)]
+                if values.size:
+                    lo, hi = np.percentile(values, [1, 99])
+                    if lo == hi:
+                        lo, hi = lo - .5, hi + .5
+                    self.overlay_artist = self.ax.imshow(np.ma.masked_invalid(view.overlay), origin='lower',
+                                                         cmap='gray', vmin=lo, vmax=hi, visible=False)
+                    levels = np.unique(np.percentile(values, [25, 50, 75]))
+                    levels = levels[(levels > values.min()) & (levels < values.max())]
+                    if levels.size:
+                        self.contours.append(self.ax.contour(
+                            view.gris_data, levels=levels, origin='lower',
+                            transform=self.ax.get_transform(view.gris_wcs),
+                            colors='cyan', linewidths=0.8))
+                ny, nx = view.gris_data.shape
+                bx, by = pixel_to_pixel(view.gris_wcs, view.wcs,
+                                        np.array([-.5, nx-.5, nx-.5, -.5, -.5]),
+                                        np.array([-.5, -.5, ny-.5, ny-.5, -.5]))
+                self.boundary, = self.ax.plot(bx, by, color='cyan', linewidth=1.2)
+                detail += (f'\nCyan: GRIS boundary and 25/50/75 percentile contours of Stokes I '
+                           f'at {self.coordinate.value():.4f} Å. Flicker uses independent GRIS contrast; colourbar is SDO.')
+            # Contours must not expand the requested 50 arcsec viewport.
+            self.ax.set_xlim(-.5, data.shape[1] - .5)
+            self.ax.set_ylim(-.5, data.shape[0] - .5)
             if source == 'Atmosphere':
-                title = f'{self.parameter.currentText()} | depth {self.index.value()} | log τ ≈ {self.coordinate.value():.3f}'
+                title = f'{self.parameter.currentText()} | log τ ≈ {self.coordinate.value():.3f}'
             elif source.startswith('SDO:'):
-                title = source
+                title = source + ' | 50″ × 50″'
             else:
                 title = f'{source} {self.stokes.currentText()} | λ {self.coordinate.value():.4f} Å'
             self.ax.set_title(title, fontsize=10)
             self.detail.setText(detail)
             self.detail.setStyleSheet('')
+            if resume_flicker:
+                if was_running and self.overlay_artist is not None:
+                    self.overlay_artist.set_visible(overlay_phase)
+                else:
+                    self.toggle_flicker(True)
         except Exception as exc:
-            # Never leave a previous frame visible under a new timestamp on error.
+            self.stop_flicker()
             if self.artist is not None:
                 self.artist.set_visible(False)
                 self.colorbar.ax.set_visible(False)
+            if self.boundary is not None:
+                self.boundary.set_visible(False)
+            for contour in self.contours:
+                contour.set_visible(False)
             self.ax.set_title('Frame unavailable', fontsize=10)
             self.detail.setText(str(exc))
             self.detail.setStyleSheet('color: #b04030')
         self.canvas.draw_idle()
+
+    @staticmethod
+    def world_readout(wcs, x, y, absolute):
+        wx, wy = wcs.pixel_to_world_values(x, y)
+        if absolute:
+            wx = (wx + 180) % 360 - 180
+        units = wcs.world_axis_units
+        wx = (wx * u.Unit(units[0])).to_value(u.arcsec)
+        wy = (wy * u.Unit(units[1])).to_value(u.arcsec)
+        return f'X={wx:.2f} arcsec, Y={wy:.2f} arcsec'
 
 
 class ComparisonWidget(QtWidgets.QWidget):
@@ -202,8 +298,7 @@ class ComparisonWidget(QtWidgets.QWidget):
         apply.clicked.connect(self.rebuild_grid)
         grid_bar.addWidget(apply)
         self.time_mode = QtWidgets.QComboBox()
-        self.time_mode.addItem('SDO: nominal filename clocks', 'nominal')
-        self.time_mode.addItem('SDO: convert filename clocks to UTC', 'utc')
+        self.time_mode.addItem('SDO: saved match / nearest UTC', 'utc')
         grid_bar.addWidget(self.time_mode)
         self.tolerance = QtWidgets.QDoubleSpinBox()
         self.tolerance.setRange(0, 86400)
@@ -258,6 +353,7 @@ class ComparisonWidget(QtWidgets.QWidget):
         while len(self.panels) > count:
             panel = self.panels.pop()
             self.grid.removeWidget(panel)
+            panel.stop_flicker()
             panel.deleteLater()
         while len(self.panels) < count:
             panel = ImagePanel(self, len(self.panels) + 1)
@@ -304,6 +400,8 @@ class ComparisonWidget(QtWidgets.QWidget):
 
     def closeEvent(self, event):
         self.timer.stop()
+        for panel in self.panels:
+            panel.stop_flicker()
         super().closeEvent(event)
 
 
@@ -315,7 +413,8 @@ class FileDialog(QtWidgets.QDialog):
         self.fields = {}
         for key, label in [('observation', 'Observation FITS (required)'), ('timestamps', 'Timestamp CSV (required)'),
                            ('atmosphere', 'Merged atmosphere (optional)'), ('profiles', 'Merged profiles (optional)'),
-                           ('aligned_root', 'Aligned SDO root (optional)')]:
+                           ('aligned_root', 'Aligned SDO root (optional)'),
+                           ('gris_wcs', 'GRIS WCS directory (auto from SDO root)')]:
             line = QtWidgets.QLineEdit(str(getattr(args, key) or ''))
             self.fields[key] = line
             row = QtWidgets.QHBoxLayout()
@@ -332,7 +431,7 @@ class FileDialog(QtWidgets.QDialog):
         self.resize(850, 240)
 
     def browse(self, key):
-        if key == 'aligned_root':
+        if key in ('aligned_root', 'gris_wcs'):
             value = QtWidgets.QFileDialog.getExistingDirectory(self, 'Aligned SDO root')
         else:
             value, _ = QtWidgets.QFileDialog.getOpenFileName(self, 'Select ' + key)
@@ -350,13 +449,14 @@ def main():
     parser.add_argument('--atmosphere', help='output_merged_atmos HDF5/.nc')
     parser.add_argument('--profiles', help='output_merged_profs HDF5/.nc')
     parser.add_argument('--aligned-root', help='Directory containing AIA/ and HMI/')
+    parser.add_argument('--gris-wcs', help='GRIS .hdr directory; defaults to aligned-root/HMI/Continuum/gris_wcs')
     parser.add_argument('--rows', type=int, choices=range(1, 7), default=2)
     parser.add_argument('--columns', type=int, choices=range(1, 7), default=2)
     parser.add_argument('--wave-start', type=float, default=8540.67304823)
     parser.add_argument('--wave-step', type=float, default=0.0109907)
     args = parser.parse_args()
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
-    paths = {key: getattr(args, key) for key in ('observation', 'timestamps', 'atmosphere', 'profiles', 'aligned_root')}
+    paths = {key: getattr(args, key) for key in ('observation', 'timestamps', 'atmosphere', 'profiles', 'aligned_root', 'gris_wcs')}
     dialog = None
     while True:
         if not paths['observation'] or dialog is not None:

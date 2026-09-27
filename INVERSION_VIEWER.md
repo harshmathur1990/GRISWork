@@ -9,8 +9,12 @@ python inversion_viewer.py
 
 The opening dialog selects the observed Ca FITS cube, timestamp CSV, optional
 merged atmosphere/profile files and optional aligned SDO root (containing
-`HMI/Continuum`, `HMI/Magnetogram`, `AIA/171`, etc.). Any subdirectory with
-recognizable SDO FITS filenames becomes a selectable channel. Files are read only.
+`HMI/Continuum`, `HMI/Magnetogram`, `AIA/171`, etc.). The root `alignment.json`
+selects the saved nearest-UTC match per GRIS frame/channel. Without a manifest,
+only `<channel>/registered/*.fits` are indexed for nearest-UTC matching. Older
+cropped products are ignored. Files are read only. GRIS headers are discovered
+from the manifest or `HMI/Continuum/gris_wcs`; the dialog and `--gris-wcs` option
+can select a different header directory.
 
 You can also supply paths directly:
 
@@ -63,20 +67,43 @@ inversion cubes into memory.
 
 CSV row 1 maps to cube time index 0; `series_index` must be consecutive and the
 CSV must have exactly as many timestamps as the observation (30 for this run).
-Inversion grids and time dimensions must match the observation. All maps use
-lower-origin pixel coordinates with no additional transpose, flip or reprojection.
-SDO images with different spatial dimensions are reported as unavailable.
+Inversion grids and time dimensions must match the observation and GRIS headers.
+All spatial axes and cursor coordinates use arcseconds. With GRIS WCS headers,
+observations, fitted profiles, and inversion maps use the per-frame solar WCS;
+no transpose or flip is applied to these arrays. Without headers, standalone
+GRIS/inversion panels explicitly show relative offsets from the field centre at
+0.135 arcsec per sample. Absolute SDO overlays require the saved GRIS WCS.
 
-By default, SDO files are matched to the nearest telescope time using **nominal
-filename clocks**, preserving `align_sdo_from_hmi_continuum.py` conventions,
-including its treatment of HMI TAI filenames. An optional UTC mode converts HMI
-filename TAI clocks to UTC; AIA filename clocks are already UTC. Matching is by
-source image time; `ALNREF` identifies the spatial alignment reference and is
-shown separately. The default maximum absolute offset is 60 seconds and is
-editable. Each SDO panel shows the selected filename, clock, signed offset and
-alignment reference. Missing/out-of-range/invalid frames clear the panel rather
-than retaining a stale image. A source image can be reused at adjacent telescope
-frames if it is the closest image within tolerance.
+Every SDO panel displays a **50″ × 50″** field centred on the GRIS field centre.
+The full registered map is sampled onto a 200 × 200 display grid with 0.25″
+sampling. This is a display interpolation, not improved instrumental resolution;
+no cropped or resampled FITS files are written. Regions outside the source are
+blank. The source and GRIS coordinate reference times are retained; the viewer
+does not apply differential solar rotation between observations.
+
+Cyan lines show the **GRIS field boundary and intensity contours** at the 25th,
+50th, and 75th percentiles of its selected Stokes-I image. For SDO panels, open
+**Settings** and choose the **GRIS overlay wavelength sample** or wavelength in
+Å; the default is the first observed wavelength sample. Choose a continuum
+wavelength when checking alignment against HMI continuum. These are intensity
+contours, not contours of an automatically selected inversion parameter.
+
+Each SDO panel has a **Flicker GRIS** button. It switches every 500 ms between SDO
+and the selected GRIS image inside the GRIS footprint; the larger surrounding
+SDO field remains visible. GRIS is shown in grayscale with independent 1–99%
+contrast. The colourbar continues to describe the SDO image. Click **Stop flicker**
+to return to SDO. Switching away from SDO, removing a panel, closing the viewer,
+or encountering an unavailable frame stops that panel's flicker timer. Changing
+time updates its data and WCS without resetting the flicker phase.
+
+The manifest's explicit associations take precedence over extra files left on
+disk. Manifest timestamps must agree with the CSV, and header indices and shapes
+must agree with the GRIS cube. In the fallback directory scan, HMI filename TAI
+clocks are converted to UTC and AIA clocks are already UTC. The former nominal
+clock mode has been removed. The maximum absolute offset is 60 seconds by default
+and is editable. Each SDO panel shows its filename, source UTC and signed offset.
+Missing/out-of-range/invalid frames clear both the image and overlays rather than
+retaining a stale frame. One registered source may serve adjacent GRIS frames.
 
 ## Embedding and tests
 
@@ -90,6 +117,7 @@ QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -v
 ```
 
 Tests use small generated FITS/HDF5 data to check array orientation, units,
-timestamp validation, SDO clock matching and tolerances, panel controls, grid
-changes, playback and stale-image clearing. Real-data validation still requires
+timestamp validation, UTC/manifest matching and tolerances, 50″ viewport centring, rotated WCS
+resampling, contours, flicker lifecycle, panel controls, grid changes, playback
+and stale-image clearing. Real-data validation still requires
 the external telescope, inversion and aligned SDO files.
