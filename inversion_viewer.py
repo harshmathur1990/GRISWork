@@ -216,33 +216,27 @@ class ImagePanel(QtWidgets.QGroupBox):
             if view.gris_data is not None:
                 # Images share the display WCS; transparent GRIS exterior keeps SDO context.
                 values = view.gris_data[np.isfinite(view.gris_data)]
-                if values.size:
+                if values.size and view.overlay is not None:
                     lo, hi = np.percentile(values, [1, 99])
                     if lo == hi:
                         lo, hi = lo - .5, hi + .5
                     self.overlay_artist = self.ax.imshow(np.ma.masked_invalid(view.overlay), origin='lower',
-                                                         cmap='gray', vmin=lo, vmax=hi, visible=False)
-                    levels = np.unique(np.percentile(values, [25, 50, 75]))
-                    levels = levels[(levels > values.min()) & (levels < values.max())]
-                    if levels.size:
-                        self.contours.append(self.ax.contour(
-                            view.gris_data, levels=levels, origin='lower',
-                            transform=self.ax.get_transform(view.gris_wcs),
-                            colors='cyan', linewidths=0.8))
+                                                         cmap='gray', vmin=lo, vmax=hi, visible=False,
+                                                         extent=view.overlay_extent)
                 ny, nx = view.gris_data.shape
                 bx, by = pixel_to_pixel(view.gris_wcs, view.wcs,
                                         np.array([-.5, nx-.5, nx-.5, -.5, -.5]),
                                         np.array([-.5, -.5, ny-.5, ny-.5, -.5]))
                 self.boundary, = self.ax.plot(bx, by, color='cyan', linewidth=1.2)
-                detail += (f'\nCyan: GRIS boundary and 25/50/75 percentile contours of Stokes I '
-                           f'at {self.coordinate.value():.4f} Å. Flicker uses independent GRIS contrast; colourbar is SDO.')
-            # Contours must not expand the requested 50 arcsec viewport.
+                detail += (f'\nOptional flicker: GRIS Stokes I at {self.coordinate.value():.4f} Å; '
+                           'independent contrast; colourbar is SDO.')
+            # Keep the whole registered image visible regardless of the GRIS footprint.
             self.ax.set_xlim(-.5, data.shape[1] - .5)
             self.ax.set_ylim(-.5, data.shape[0] - .5)
             if source == 'Atmosphere':
                 title = f'{self.parameter.currentText()} | log τ ≈ {self.coordinate.value():.3f}'
             elif source.startswith('SDO:'):
-                title = source + ' | 50″ × 50″'
+                title = source + ' | Full disk'
             else:
                 title = f'{source} {self.stokes.currentText()} | λ {self.coordinate.value():.4f} Å'
             self.ax.set_title(title, fontsize=10)

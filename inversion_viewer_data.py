@@ -53,6 +53,7 @@ class DisplayImage:
     gris_data: np.ndarray | None = None
     gris_wcs: WCS | None = None
     overlay: np.ndarray | None = None
+    overlay_extent: tuple | None = None
 
 
 class DataStore:
@@ -235,29 +236,24 @@ class DataStore:
         return frame, delta
 
     @staticmethod
-    def sample_on_wcs(data, source_wcs, target_wcs, shape):
+    def sample_on_wcs(data, source_wcs, target_wcs, shape, extent=None):
         y, x = np.indices(shape, dtype=float)
+        if extent is not None:
+            left, right, bottom, top = extent
+            x = left + (x + .5) * (right - left) / shape[1]
+            y = bottom + (y + .5) * (top - bottom) / shape[0]
         sx, sy = pixel_to_pixel(target_wcs, source_wcs, x, y)
         return map_coordinates(np.asarray(data, dtype=float), [sy, sx], order=1,
                                mode='constant', cval=np.nan)
 
-    @lru_cache(maxsize=12)
     def sdo_view(self, source, time_index, tolerance):
         if not self.gris_headers:
             raise ValueError('Load gris_wcs headers to locate GRIS on the full registered SDO image.')
         frame, delta = self.matched_sdo(source, time_index, tolerance)
         registered = self._sdo_map(frame.path)
-        gris = sunpy.map.Map(np.zeros((self.ny, self.nx)), self.gris_headers[time_index])
-        centre = gris.pixel_to_world((self.nx - 1) / 2 * u.pix, (self.ny - 1) / 2 * u.pix)
-        # Display-only sampling: 200 × 0.25 arcsec = a 50 × 50 arcsec footprint.
-        shape = (200, 200)
-        header = sunpy.map.make_fitswcs_header(np.zeros(shape), centre,
-                                               scale=[0.25, 0.25] * u.arcsec / u.pix)
-        wcs = WCS(header)
-        image = self.sample_on_wcs(registered.data, registered.wcs, wcs, shape)
         detail = (f'{frame.path.name}\nSource UTC: {frame.utc.isoformat()} | Δt {delta:+.3f} s'
-                  '\n50″ × 50″ centred on GRIS; display resampling only.')
-        return image, registered.meta.get('bunit', 'native units'), detail, wcs
+                  '\nFull registered SDO field; cyan rectangle marks the GRIS field of view.')
+        return registered.data, registered.meta.get('bunit', 'native units'), detail, registered.wcs
 
     def display(self, source, time_index, index=0, stokes=0, parameter='temp', tolerance=60.):
         if not source.startswith('SDO:'):
@@ -268,10 +264,20 @@ class DataStore:
         data, unit, detail, wcs = self.sdo_view(source, time_index, tolerance)
         gris_data = np.array(self.obs[time_index, 0, :, :, index])
         gris_wcs = self.spatial_wcs(time_index)
-        overlay = self.sample_on_wcs(gris_data, gris_wcs, wcs, data.shape)
-        return DisplayImage(data, unit, detail, wcs, True, gris_data, gris_wcs, overlay)
+        # Prepare only a small overlay around GRIS, never a full-disk resampling.
+        ny, nx = gris_data.shape
+        bx, by = pixel_to_pixel(gris_wcs, wcs,
+                                np.array([-.5, nx-.5, nx-.5, -.5]),
+                                np.array([-.5, -.5, ny-.5, ny-.5]))
+        overlay, extent = None, None
+        if np.isfinite([bx, by]).all():
+            extent = (max(-.5, bx.min() - 1), min(data.shape[1] - .5, bx.max() + 1),
+                      max(-.5, by.min() - 1), min(data.shape[0] - .5, by.max() + 1))
+            if extent[0] < extent[1] and extent[2] < extent[3]:
+                shape = (min(1024, max(32, ny)), min(1024, max(32, nx)))
+                overlay = self.sample_on_wcs(gris_data, gris_wcs, wcs, shape, extent)
+        return DisplayImage(data, unit, detail, wcs, True, gris_data, gris_wcs, overlay, extent)
 
     def close(self):
         self._sdo_map.cache_clear()
-        self.sdo_view.cache_clear()
         self.resources.close()

@@ -74,19 +74,15 @@ no transpose or flip is applied to these arrays. Without headers, standalone
 GRIS/inversion panels explicitly show relative offsets from the field centre at
 0.135 arcsec per sample. Absolute SDO overlays require the saved GRIS WCS.
 
-Every SDO panel displays a **50″ × 50″** field centred on the GRIS field centre.
-The full registered map is sampled onto a 200 × 200 display grid with 0.25″
-sampling. This is a display interpolation, not improved instrumental resolution;
-no cropped or resampled FITS files are written. Regions outside the source are
-blank. The source and GRIS coordinate reference times are retained; the viewer
-does not apply differential solar rotation between observations.
+Every SDO panel displays the **full registered HMI/AIA image**, with its native
+WCS and arcsecond axes. There is no 50″ crop or resampling of the SDO background.
+A cyan **rectangle marks the GRIS field of view**, transformed from that frame's
+GRIS WCS into the SDO image coordinates. Intensity contours are not drawn.
+The viewer does not apply differential solar rotation between observations.
 
-Cyan lines show the **GRIS field boundary and intensity contours** at the 25th,
-50th, and 75th percentiles of its selected Stokes-I image. For SDO panels, open
-**Settings** and choose the **GRIS overlay wavelength sample** or wavelength in
-Å; the default is the first observed wavelength sample. Choose a continuum
-wavelength when checking alignment against HMI continuum. These are intensity
-contours, not contours of an automatically selected inversion parameter.
+For optional flickering, open **Settings** to select the **GRIS overlay wavelength
+sample** or wavelength in Å; the default is the first observed wavelength sample.
+Choose a continuum wavelength when checking alignment against HMI continuum.
 
 Each SDO panel has a **Flicker GRIS** button. It switches every 500 ms between SDO
 and the selected GRIS image inside the GRIS footprint; the larger surrounding
@@ -117,7 +113,7 @@ QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -v
 ```
 
 Tests use small generated FITS/HDF5 data to check array orientation, units,
-timestamp validation, UTC/manifest matching and tolerances, 50″ viewport centring, rotated WCS
-resampling, contours, flicker lifecycle, panel controls, grid changes, playback
+timestamp validation, UTC/manifest matching and tolerances, preservation of full SDO arrays, rotated
+WCS rectangle placement, flicker lifecycle, panel controls, grid changes, playback
 and stale-image clearing. Real-data validation still requires
 the external telescope, inversion and aligned SDO files.
