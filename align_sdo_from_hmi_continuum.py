@@ -1,506 +1,274 @@
 #!/usr/bin/env python3
-"""Align SDO channels to an already-aligned HMI continuum sequence.
+"""Associate full registered SDO images with saved GRIS WCS headers.
 
-``alignment_GUI_HMI.py`` writes each aligned HMI continuum image on the
-ground-based image grid.  Consequently, the image shape and WCS in each of
-those FITS files are a complete description of the required crop, rotation,
-and pixel scale.  This script registers a raw SDO image when requested,
-differentially rotates it to the matched continuum reference time, and
-reprojects it onto that grid.  Differential rotation is enabled by default for
-all channels, including HMI channels, so mismatched downloaded frames are
-propagated to the continuum reference time before reprojection.
+Read HMI/Continuum/gris_wcs/*.hdr under --aligned-root (or --gris-wcs).
+Match each header's GRISDATE to each channel in UTC, retain all sources within
+the time window of any GRIS frame, register each source once, and write <channel>/registered/<source-name>.fits. Write one
+alignment.json at --aligned-root linking all channels to the GRIS headers.
+No GRIS images, cropped images, reprojections, or differential rotations are
+written. Source observation times and registered WCS remain intact.
 
-By default, every source image sufficiently close in time to the aligned
-continuum sequence is mapped to its nearest continuum frame for each of these
-channels::
-
-    HMI/Magnetogram
-    AIA/171
-    AIA/1600
-
-The default paths reproduce the directory layout used in
-``alignment_GUI_HMI.py``.  They can be changed from the command line.
-
-Example
--------
-python align_sdo_from_hmi_continuum.py \
-    --raw-root /mnt/f/GRIS/SDO \
-    --aligned-root /mnt/f/GRIS/aligned_SDO
-
-The output is written below ``--aligned-root`` using the same relative channel
-directories and the original source filenames.
+Example:
+    python align_sdo_from_hmi_continuum.py \\
+        --raw-root /mnt/f/GRIS/SDO --aligned-root /mnt/f/GRIS/aligned_SDO
 """
-
 from __future__ import annotations
 
 import argparse
+import json
+import math
+import os
 import re
 import sys
-from contextlib import nullcontext
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-
-CHANNELS = ("HMI/Magnetogram", "AIA/171", "AIA/1600", "AIA/304")
-
-# This deliberately treats the clock in an HMI ``*_TAI`` filename as a
-# nominal clock, rather than converting TAI to UTC.  alignment_GUI_HMI.py uses
-# exactly this convention when it associates HMI images with ground frames.
-HMI_TIME_RE = re.compile(r"\.(?P<date>\d{8})_(?P<time>\d{6})_TAI\.")
+CHANNELS = ("HMI/Continuum", "HMI/Magnetogram", "AIA/171", "AIA/1600", "AIA/304")
+HMI_TIME_RE = re.compile(r"(?P<date>\d{8})_(?P<time>\d{6})(?P<fraction>\.\d+)?_TAI", re.I)
 HMI_FIDO_TIME_RE = re.compile(
     r"(?P<year>\d{4})[._-](?P<month>\d{2})[._-](?P<day>\d{2})[_T]"
-    r"(?P<hour>\d{2})[:_]?(?P<minute>\d{2})[:_]?(?P<second>\d{2})_TAI",
-    re.IGNORECASE,
-)
+    r"(?P<hour>\d{2})[:_]?(?P<minute>\d{2})[:_]?(?P<second>\d{2})"
+    r"(?P<fraction>\.\d+)?_TAI", re.I)
 AIA_TIME_RE = re.compile(
-    r"\.(?P<date>\d{4}-\d{2}-\d{2})T(?P<time>\d{6})Z\."
-)
-# VSO/Fido can return names such as
-# ``aia.lev1.304A_2020_01_01T00_00_00.64Z.image_lev1.fits`` instead of the
-# JSOC-style name used by the original downloads.
-AIA_FIDO_TIME_RE = re.compile(
     r"(?P<year>\d{4})[-_](?P<month>\d{2})[-_](?P<day>\d{2})T"
     r"(?P<hour>\d{2})[_:]?(?P<minute>\d{2})[_:]?(?P<second>\d{2})"
-)
+    r"(?P<fraction>\.\d+)?Z", re.I)
 
 
 @dataclass(frozen=True)
 class TimedFile:
-    """A FITS path and its nominal sequence time."""
-
     time: datetime
     path: Path
 
 
 @dataclass(frozen=True)
-class Match:
-    """A source image associated with an aligned continuum reference."""
+class GrisReference:
+    frame_index: int
+    time: datetime
+    path: Path
+    wcs_time: str
+    shape: tuple[int, int]
+    wavelength_index: int | None
 
-    reference: TimedFile
-    source: TimedFile
-    delta_seconds: float
 
+def utc_time_from_name(path: Path) -> datetime:
+    """Read JSOC/Fido names, converting explicitly labelled HMI TAI to UTC."""
+    from astropy.time import Time
 
-def nominal_time_from_name(path: Path) -> datetime:
-    """Read an HMI or AIA nominal time from a standard SDO filename.
-
-    Naive ``datetime`` objects are intentional: both clocks are compared as
-    printed in the filenames, matching ``alignment_GUI_HMI.py``.
-    """
-
-    hmi_match = HMI_TIME_RE.search(path.name)
-    if hmi_match:
-        value = hmi_match.group("date") + hmi_match.group("time")
-        return datetime.strptime(value, "%Y%m%d%H%M%S")
-
-    hmi_fido_match = HMI_FIDO_TIME_RE.search(path.name)
-    if hmi_fido_match:
-        values = {key: int(value) for key, value in hmi_fido_match.groupdict().items()}
-        return datetime(
-            values["year"],
-            values["month"],
-            values["day"],
-            values["hour"],
-            values["minute"],
-            values["second"],
-        )
-
-    aia_match = AIA_TIME_RE.search(path.name)
-    if aia_match:
-        value = aia_match.group("date") + aia_match.group("time")
-        return datetime.strptime(value, "%Y-%m-%d%H%M%S")
-
-    aia_fido_match = AIA_FIDO_TIME_RE.search(path.name)
-    if aia_fido_match:
-        values = {key: int(value) for key, value in aia_fido_match.groupdict().items()}
-        return datetime(
-            values["year"],
-            values["month"],
-            values["day"],
-            values["hour"],
-            values["minute"],
-            values["second"],
-        )
-
-    raise ValueError(f"Cannot extract an SDO time from filename: {path.name}")
+    match = HMI_TIME_RE.search(path.name)
+    if match:
+        value = datetime.strptime(match['date'] + match['time'], '%Y%m%d%H%M%S').isoformat()
+        value += match['fraction'] or ''
+        return Time(value, scale='tai').utc.to_datetime(timezone=timezone.utc)
+    match = HMI_FIDO_TIME_RE.search(path.name)
+    scale = 'tai'
+    if match is None:
+        match = AIA_TIME_RE.search(path.name)
+        scale = 'utc'
+    if match is None:
+        raise ValueError(f'Cannot extract a UTC/TAI SDO time from filename: {path.name}')
+    value = (f"{match['year']}-{match['month']}-{match['day']}T"
+             f"{match['hour']}:{match['minute']}:{match['second']}{match['fraction'] or ''}")
+    return Time(value, scale=scale).utc.to_datetime(timezone=timezone.utc)
 
 
 def index_fits(directory: Path) -> list[TimedFile]:
-    """Return all parseable FITS files in *directory*, sorted by time."""
-
     if not directory.is_dir():
-        raise FileNotFoundError(f"Input directory does not exist: {directory}")
-
-    indexed: list[TimedFile] = []
-    rejected: list[str] = []
-    for path in sorted(directory.glob("*.fits")):
+        raise FileNotFoundError(f'Input directory does not exist: {directory}')
+    indexed = []
+    for path in sorted(directory.glob('*.fits')):
         try:
-            indexed.append(TimedFile(nominal_time_from_name(path), path))
-        except ValueError:
-            rejected.append(path.name)
-
-    if rejected:
-        print(
-            f"Warning: ignored {len(rejected)} file(s) with unrecognized names "
-            f"in {directory}",
-            file=sys.stderr,
-        )
+            indexed.append(TimedFile(utc_time_from_name(path), path))
+        except ValueError as error:
+            print(f'Warning: {error}', file=sys.stderr)
     if not indexed:
-        raise FileNotFoundError(f"No parseable FITS files found in: {directory}")
-
+        raise FileNotFoundError(f'No parseable FITS files found in: {directory}')
     return sorted(indexed, key=lambda item: (item.time, item.path.name))
 
 
-def match_nearest(
-    references: Sequence[TimedFile],
-    sources: Sequence[TimedFile],
-    max_delta_seconds: float,
-) -> list[Match]:
-    """Associate every in-range source with its nearest reference frame.
+def load_gris_headers(directory: Path) -> list[GrisReference]:
+    """Read header-only alignment outputs; no GRIS or continuum images needed."""
+    from astropy.io import fits
+    from astropy.time import Time
+    from astropy.wcs import WCS
 
-    The source and reference cadences need not be equal.  Iterating over the
-    source sequence also ensures every output filename is unique.
-    """
-
-    matches: list[Match] = []
-    for source in sources:
-        reference = min(
-            references,
-            key=lambda item: (abs(item.time - source.time), item.time),
-        )
-        delta = abs((source.time - reference.time).total_seconds())
-        if delta <= max_delta_seconds:
-            matches.append(Match(reference, source, delta))
-
-    if not matches:
-        raise RuntimeError(
-            f"No source frames are within {max_delta_seconds:g} s of the "
-            "aligned continuum sequence"
-        )
-
-    return matches
-
-
-def _load_dependencies() -> tuple[Any, Any, Any, Any, Any]:
-    """Import the scientific packages only when processing is requested."""
-
-    try:
-        import numpy as np
-    except ImportError as exc:
-        raise RuntimeError(
-            f"Could not import numpy: {exc}. Install it into the Python "
-            f"environment running this script ({sys.executable})."
-        ) from exc
-
-    try:
-        from astropy.io import fits
-    except ImportError as exc:
-        raise RuntimeError(
-            f"Could not import astropy.io.fits: {exc}. Install astropy into "
-            f"the Python environment running this script ({sys.executable})."
-        ) from exc
-
-    try:
-        import sunpy.map
-    except ImportError as exc:
-        raise RuntimeError(
-            f"Could not import sunpy.map: {exc}. Install SunPy (including its "
-            f"map dependencies) into {sys.executable}."
-        ) from exc
-
-    try:
-        from sunpy.coordinates import propagate_with_solar_surface
-    except ImportError as exc:
-        raise RuntimeError(
-            f"Could not import sunpy.coordinates.propagate_with_solar_surface: "
-            f"{exc}. Install a recent SunPy into {sys.executable}."
-        ) from exc
-
-    try:
-        from aiapy.calibrate import register
-    except ImportError as exc:
-        raise RuntimeError(
-            f"Could not import aiapy.calibrate.register: {exc}. Install aiapy "
-            f"into {sys.executable}."
-        ) from exc
-
-    # Give a clear error up front instead of failing after the first large map
-    # has been read.  SunPy imports without this optional reprojection package,
-    # but Map.reproject_to needs it at runtime.
-    try:
-        import reproject  # noqa: F401
-    except ImportError as exc:
-        raise RuntimeError(
-            f"Could not import reproject: {exc}. Install reproject into the "
-            f"Python environment running this script ({sys.executable})."
-        ) from exc
-
-    return np, sunpy.map, register, propagate_with_solar_surface, fits
-
-
-def _copy_source_metadata(
-    output_meta: Any,
-    source_meta: Any,
-    source_name: str,
-    reference_name: str,
-    *,
-    do_differential_rotation: bool,
-) -> Any:
-    """Keep the target WCS while identifying the actual source observation."""
-
-    # The reprojected map supplies the target spatial WCS.  Copy only
-    # non-spatial observation metadata from the source, so no source CRPIX,
-    # CDELT, PC, or CD keyword can corrupt the continuum alignment grid.
-    source_keys = (
-        "date-obs",
-        "date_obs",
-        "t_obs",
-        "timesys",
-        "telescop",
-        "instrume",
-        "detector",
-        "wavelnth",
-        "waveunit",
-        "bunit",
-        "content",
-        "exptime",
-        "quality",
-        "lvl_num",
-        "hglt_obs",
-        "hgln_obs",
-        "dsun_obs",
-        "rsun_obs",
-        "rsun_ref",
-    )
-    for key in source_keys:
-        if key in source_meta:
-            output_meta[key] = source_meta[key]
-
-    output_meta["ALNMETH"] = (
-        "REGISTER+DIFFROT+REPROJECT"
-        if do_differential_rotation
-        else "REGISTER+REPROJECT"
-    )
-    output_meta["ALNREF"] = reference_name
-    output_meta["SRCFILE"] = source_name
-    output_meta["ALNROT"] = "DIFFERENTIAL" if do_differential_rotation else "NONE"
-    return output_meta
-
-
-def align_one(
-    source_path: Path,
-    reference_path: Path,
-    output_path: Path,
-    *,
-    overwrite: bool,
-    do_register: bool,
-    do_differential_rotation: bool,
-) -> None:
-    """Register and reproject one SDO image onto one continuum reference."""
-
-    np, sunpy_map, register, propagate_with_solar_surface, fits = _load_dependencies()
-
-    source_map = sunpy_map.Map(str(source_path))
-    reference_map = sunpy_map.Map(str(reference_path))
-
-    if source_map.data.ndim != 2 or reference_map.data.ndim != 2:
-        raise ValueError(
-            "Only two-dimensional image maps are supported: "
-            f"source={source_map.data.shape}, reference={reference_map.data.shape}"
-        )
-
-    if do_register:
+    references = []
+    for path in sorted(directory.glob('*.hdr')):
+        header = fits.Header.fromtextfile(path)
         try:
-            source_map = register(source_map)
-        except Exception as exc:
-            raise RuntimeError(f"aiapy registration failed for {source_path}") from exc
+            index = int(header['GRISIDX'])
+            stamp = datetime.fromisoformat(header['GRISDATE'].replace('Z', '+00:00'))
+            shape = (int(header['NAXIS2']), int(header['NAXIS1']))
+            wcs = WCS(header)
+            if index < 0 or min(shape) <= 0 or not wcs.has_celestial or wcs.pixel_n_dim != 2:
+                raise ValueError('Expected a non-negative GRISIDX and a two-dimensional solar WCS')
+            if stamp.tzinfo is None or stamp.utcoffset().total_seconds() != 0:
+                raise ValueError('GRISDATE must explicitly use UTC')
+            # Keep the coordinate reference time distinct from the GRIS exposure.
+            wcs_time = Time(header['DATE-OBS'], scale=header.get('TIMESYS', 'UTC').lower()).utc.isot
+            wave = int(header['GRISWAVE']) if 'GRISWAVE' in header else None
+        except (KeyError, ValueError, TypeError) as error:
+            raise ValueError(f'Invalid GRIS header {path}: {error}') from error
+        references.append(GrisReference(index, stamp.astimezone(timezone.utc), path, wcs_time, shape, wave))
+    if not references:
+        raise FileNotFoundError(f'No GRIS .hdr files found in: {directory}')
+    references.sort(key=lambda item: item.frame_index)
+    if len({ref.frame_index for ref in references}) != len(references):
+        raise ValueError('Duplicate GRISIDX values in GRIS WCS headers')
+    if any(b.time <= a.time for a, b in zip(references, references[1:])):
+        raise ValueError('GRISDATE must increase with GRISIDX')
+    return references
 
-    rotation_context = (
-        propagate_with_solar_surface()
-        if do_differential_rotation
-        else nullcontext()
-    )
-    try:
-        with rotation_context:
-            aligned_map = source_map.reproject_to(
-                reference_map.wcs,
-                shape_out=reference_map.data.shape,
-                algorithm="interpolation",
-                order="bilinear",
-            )
-    except Exception as exc:
-        raise RuntimeError(
-            f"Reprojection failed for {source_path} using {reference_path}"
-        ) from exc
 
-    # Start from the metadata returned by reproject_to because it represents
-    # the target grid.  Add source identity/time without replacing spatial WCS.
-    output_meta = _copy_source_metadata(
-        aligned_map.meta.copy(),
-        source_map.meta,
-        source_path.name,
-        reference_path.name,
-        do_differential_rotation=do_differential_rotation,
-    )
-    output_meta["naxis1"] = aligned_map.data.shape[1]
-    output_meta["naxis2"] = aligned_map.data.shape[0]
+def match_nearest(reference: GrisReference, sources: Sequence[TimedFile],
+                  max_delta_seconds: float) -> TimedFile | None:
+    """Nearest source for this GRIS frame; shared sources are registered once."""
+    if not sources:
+        return None
+    source = min(sources, key=lambda item: (abs(item.time - reference.time), item.time, item.path.name))
+    return source if abs((source.time - reference.time).total_seconds()) <= max_delta_seconds else None
 
+
+def register_one(source_path: Path, output_path: Path, *, overwrite: bool,
+                 do_register: bool) -> None:
+    """Save the full map, with its own observation WCS and time."""
+    import sunpy.map
+    source = sunpy.map.Map(str(source_path))
+    if source.data.ndim != 2:
+        raise ValueError(f'Only 2-D images are supported: {source_path}')
+    if do_register:
+        from aiapy.calibrate import register
+        source = register(source)
+    source.meta['SRCFILE'] = source_path.name
+    source.meta['ALNMETH'] = 'REGISTER' if do_register else 'ALREADY_REGISTERED'
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    data = np.asarray(aligned_map.data, dtype=np.float32)
-    fits.writeto(
-        output_path,
-        data,
-        header=fits.Header(output_meta),
-        overwrite=overwrite,
-        output_verify="silentfix",
-    )
+    source.save(output_path, overwrite=overwrite)
 
 
-def process_channel(
-    channel: str,
-    references: Sequence[TimedFile],
-    raw_root: Path,
-    aligned_root: Path,
-    *,
-    max_delta_seconds: float,
-    overwrite: bool,
-    do_register: bool,
-    do_differential_rotation: bool,
-    dry_run: bool,
-) -> tuple[int, int]:
-    """Align each temporally relevant source to its nearest reference."""
+def relative_path(path: Path, root: Path) -> str:
+    return os.path.relpath(path.resolve(), root.resolve())
 
-    sources = index_fits(raw_root / channel)
-    matches = match_nearest(references, sources, max_delta_seconds)
-    written = 0
-    skipped = 0
 
-    print(f"\n{channel}: {len(matches)} frame(s)")
-    for number, match in enumerate(matches, start=1):
-        output_path = aligned_root / channel / match.source.path.name
-        message = (
-            f"[{number:02d}/{len(matches):02d}] {match.source.path.name} -> "
-            f"{match.reference.path.name} (dt={match.delta_seconds:.0f} s)"
-        )
-
-        if output_path.exists() and not overwrite:
-            print(f"SKIP {message}")
-            skipped += 1
+def process_channel(channel: str, references: Sequence[GrisReference], raw_root: Path,
+                    aligned_root: Path, *, max_delta_seconds: float, overwrite: bool,
+                    do_register: bool, dry_run: bool) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]], int, int]:
+    """Keep every temporally relevant source and each GRIS frame's nearest match."""
+    records: dict[int, dict[str, Any]] = {}
+    try:
+        sources = index_fits(raw_root / channel)
+    except FileNotFoundError as error:
+        print(f'{channel}: {error}', file=sys.stderr)
+        return {ref.frame_index: dict(status='unmatched', reason=str(error)) for ref in references}, [], 0, 0
+    processed = {}
+    observations = []
+    written = skipped = 0
+    for source in sources:
+        nearest = min(references, key=lambda ref: (abs(source.time - ref.time), ref.time, ref.frame_index))
+        if abs((source.time - nearest.time).total_seconds()) > max_delta_seconds:
             continue
-
-        print(("PLAN " if dry_run else "DO   ") + message)
-        if not dry_run:
-            align_one(
-                match.source.path,
-                match.reference.path,
-                output_path,
-                overwrite=overwrite,
-                do_register=do_register,
-                do_differential_rotation=do_differential_rotation,
-            )
-            written += 1
-
-    return written, skipped
+        output = aligned_root / channel / 'registered' / source.path.name
+        error = None
+        if output.exists() and not overwrite:
+            state = 'existing'
+            skipped += 1
+        elif dry_run:
+            state = 'planned'
+        else:
+            try:
+                register_one(source.path, output, overwrite=overwrite, do_register=do_register)
+                state = 'written'
+                written += 1
+            except Exception as exc:
+                state, error = 'failed', str(exc)
+                print(f'Failed to register {source.path}: {error}', file=sys.stderr)
+        print(f'{channel}: {source.path.name} -> nearest GRIS {nearest.frame_index} ({state})')
+        record = dict(status=state, source_sdo=str(source.path.resolve()),
+                      timestamp_utc=source.time.isoformat(), timestamp_source='filename',
+                      registered_sdo=relative_path(output, aligned_root) if state != 'failed' else None,
+                      processing='existing_file' if state == 'existing' else
+                                 ('register' if do_register else 'already_registered_input'))
+        if error:
+            record['reason'] = error
+        processed[source.path] = record
+        observations.append(dict(record, nearest_gris_frame_index=nearest.frame_index,
+                                 gris_header=relative_path(nearest.path, aligned_root),
+                                 sdo_minus_gris_seconds=(source.time - nearest.time).total_seconds()))
+    for ref in references:
+        source = match_nearest(ref, sources, max_delta_seconds)
+        if source is None:
+            records[ref.frame_index] = dict(status='unmatched', reason=f'No observation within {max_delta_seconds:g} s')
+            print(f'{channel}: GRIS {ref.frame_index}: no match within {max_delta_seconds:g} s')
+        else:
+            records[ref.frame_index] = dict(processed[source.path],
+                                           sdo_minus_gris_seconds=(source.time - ref.time).total_seconds())
+    return records, observations, written, skipped
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--raw-root",
-        type=Path,
-        default=Path("/mnt/f/GRIS/SDO"),
-        help="Raw SDO root containing HMI/ and AIA/ (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--aligned-root",
-        type=Path,
-        default=Path("/mnt/f/GRIS/aligned_SDO"),
-        help=(
-            "Aligned root containing HMI/Continuum; other channels are written "
-            "below it (default: %(default)s)"
-        ),
-    )
-    parser.add_argument(
-        "--channels",
-        nargs="+",
-        choices=CHANNELS,
-        default=list(CHANNELS),
-        help="Channels to process (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--max-time-delta",
-        type=float,
-        default=30.0,
-        metavar="SECONDS",
-        help="Maximum allowed source/reference nominal time difference",
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Replace output FITS files that already exist",
-    )
-    parser.add_argument(
-        "--no-register",
-        action="store_true",
-        help="Skip aiapy.calibrate.register (only for already-registered input)",
-    )
-    parser.add_argument(
-        "--no-differential-rotation",
-        action="store_true",
-        help=(
-            "Skip SunPy solar-surface propagation during reprojection. By default, "
-            "source maps are differentially rotated to the matched reference time."
-        ),
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print frame associations without reading or writing FITS data",
-    )
+    parser.add_argument('--raw-root', type=Path, default=Path('/mnt/f/GRIS/SDO'),
+                        help='Raw SDO root containing HMI/ and AIA/')
+    parser.add_argument('--aligned-root', type=Path, default=Path('/mnt/f/GRIS/aligned_SDO'),
+                        help='Output root for alignment.json and channel/registered/ directories')
+    parser.add_argument('--gris-wcs', type=Path,
+                        help='GRIS .hdr directory (default: <aligned-root>/HMI/Continuum/gris_wcs)')
+    parser.add_argument('--channels', nargs='+', choices=CHANNELS, default=list(CHANNELS))
+    parser.add_argument('--max-time-delta', type=float, default=30.0, metavar='SECONDS',
+                        help='Maximum absolute SDO/GRIS UTC time difference (default: 30)')
+    parser.add_argument('--overwrite', action='store_true', help='Replace existing registered FITS outputs')
+    parser.add_argument('--no-register', action='store_true', help='Input is already registered; save full maps as supplied')
+    parser.add_argument('--dry-run', action='store_true', help='Read GRIS text headers and filenames only; write nothing')
     return parser
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.max_time_delta < 0:
-        raise ValueError("--max-time-delta must be non-negative")
-
-    reference_dir = args.aligned_root / "HMI" / "Continuum"
-    references = index_fits(reference_dir)
-    print(f"Found {len(references)} aligned continuum reference frame(s)")
-
-    total_written = 0
-    total_skipped = 0
-    for channel in args.channels:
-        written, skipped = process_channel(
-            channel,
-            references,
-            args.raw_root,
-            args.aligned_root,
-            max_delta_seconds=args.max_time_delta,
-            overwrite=args.overwrite,
-            do_register=not args.no_register,
-            do_differential_rotation=not args.no_differential_rotation,
-            dry_run=args.dry_run,
-        )
-        total_written += written
-        total_skipped += skipped
-
+    if not math.isfinite(args.max_time_delta) or args.max_time_delta < 0:
+        raise ValueError('--max-time-delta must be finite and non-negative')
+    headers_dir = args.gris_wcs or args.aligned_root / 'HMI' / 'Continuum' / 'gris_wcs'
+    references = load_gris_headers(headers_dir)
+    channels = list(dict.fromkeys(args.channels))
+    frames = [dict(frame_index=ref.frame_index, series_index=ref.frame_index + 1,
+                   timestamp_utc=ref.time.isoformat(), gris_header=relative_path(ref.path, args.aligned_root),
+                   gris_shape=list(ref.shape), wavelength_index=ref.wavelength_index,
+                   gris_wcs_reference_time_utc=ref.wcs_time, channels={}) for ref in references]
+    written = skipped = problems = 0
+    observations = {}
+    for channel in channels:
+        records, channel_observations, n_written, n_skipped = process_channel(
+            channel, references, args.raw_root, args.aligned_root,
+            max_delta_seconds=args.max_time_delta, overwrite=args.overwrite,
+            do_register=not args.no_register, dry_run=args.dry_run)
+        observations[channel] = channel_observations
+        problems += sum(item['status'] == 'failed' for item in channel_observations)
+        written += n_written
+        skipped += n_skipped
+        for frame in frames:
+            record = records[frame['frame_index']]
+            frame['channels'][channel] = record
+            problems += record['status'] == 'unmatched'
     if args.dry_run:
-        print("\nDry run complete; no files were written.")
+        print(f'Dry run complete; {problems} unmatched/failed association(s); no files written.')
     else:
-        print(
-            f"\nComplete: wrote {total_written} file(s), "
-            f"skipped {total_skipped} existing file(s)."
-        )
-    return 0
+        args.aligned_root.mkdir(parents=True, exist_ok=True)
+        manifest = dict(schema_version=1, product='gris_sdo_registered_associations',
+                        raw_root=str(args.raw_root.resolve()), gris_wcs=relative_path(headers_dir, args.aligned_root),
+                        max_time_delta_seconds=args.max_time_delta, channels=channels, frames=frames,
+                        observations=observations)
+        manifest_path = args.aligned_root / 'alignment.json'
+        temporary = manifest_path.with_suffix('.json.tmp')
+        temporary.write_text(json.dumps(manifest, indent=2) + '\n')
+        temporary.replace(manifest_path)
+        print(f'Wrote {written} full maps; reused {skipped}; {problems} unmatched/failed association(s).')
+        print(f'Manifest: {manifest_path}')
+    return 1 if problems else 0
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     try:
         raise SystemExit(main())
-    except (FileNotFoundError, RuntimeError, ValueError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    except (OSError, RuntimeError, ValueError, ImportError) as exc:
+        print(f'Error: {exc}', file=sys.stderr)
         raise SystemExit(1)

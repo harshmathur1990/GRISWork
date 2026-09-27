@@ -69,10 +69,8 @@ rotation treatment.
 
 Set `save_crops=True` in the `animate()` call to additionally export HMI on the
 GRIS grid. These optional filenames include the GRIS frame index, so two GRIS
-frames matched to one HMI file cannot overwrite each other. The existing
-`align_sdo_from_hmi_continuum.py` still consumes cropped continuum files and
-uses nominal filename clocks; it has not been migrated to this manifest and
-should not be treated as using the new exact UTC matching.
+frames matched to one HMI file cannot overwrite each other. `align_sdo_from_hmi_continuum.py` does not use these optional crops; it reads
+the GRIS WCS headers directly and exports full registered SDO images instead.
 
 ## Align with two marked features
 
@@ -145,3 +143,76 @@ After completion, inspect the flicker preview using the time slider, then click
 correlation scores, reference index, and seed frame. GRIS image data is still not
 saved again. A new batch replaces successful fits, including any earlier manual
 fits, with results from the selected reference and wavelength.
+
+
+## Register other SDO channels from the GRIS headers
+
+`align_sdo_from_hmi_continuum.py` reads the `.hdr` files in
+`<aligned-root>/HMI/Continuum/gris_wcs`. It does not require the GUI's JSON
+manifest or any cropped continuum FITS files. To use a different header directory,
+pass `--gris-wcs /path/to/gris_wcs`.
+
+```bash
+python align_sdo_from_hmi_continuum.py \
+    --raw-root /mn/stornext/d9/data/harshm/GRISData/SDO \
+    --aligned-root /mn/stornext/d9/data/harshm/GRISData/aligned_SDO
+```
+
+The default channels are HMI/Continuum, HMI/Magnetogram, AIA/171, AIA/1600, and
+AIA/304. Use `--channels AIA/171 AIA/1600` to select a subset. Each GRIS frame is
+matched to the nearest source in each selected channel using `GRISDATE` from the
+header. HMI filename TAI clocks are converted to UTC; AIA filenames retain their
+UTC clock, including fractional seconds. `--max-time-delta` defaults to 30 seconds.
+All source images within that distance of any GRIS frame are retained, so faster
+AIA observations between GRIS exposures are not discarded.
+
+Outputs are:
+
+- `<aligned-root>/<channel>/registered/<original-name>.fits`: the full image
+  after `register()`, with its own WCS and observation time. A source shared by
+  several GRIS frames is saved once. Existing registered files are reused unless
+  `--overwrite` is given. `--no-register` is only for already-registered inputs.
+- `<aligned-root>/alignment.json`: one combined manifest for the selected channels.
+  Its `frames` entries contain `gris_header`, `timestamp_utc`, and a `channels`
+  dictionary. Each channel entry includes the source path, `registered_sdo` path,
+  UTC filename timestamp, signed SDO-minus-GRIS time offset, and processing status.
+  `observations[channel]` lists every retained SDO image with its nearest GRIS
+  frame/header, including observations not selected as a frame's nearest match.
+  Header and output paths are relative to the manifest's directory.
+
+The root manifest is refreshed on every non-dry run for the selected channels.
+The GUI's separate `HMI/Continuum/alignment.json` remains untouched. Existing
+crops are not deleted, but this script no longer writes cropped HMI/AIA files,
+reprojects onto the GRIS grid, or changes an observation's time by differential
+rotation. The old `--no-differential-rotation` flag has been removed. GRIS header
+files and image data are not duplicated or modified.
+
+Use `--dry-run` to inspect associations without loading image arrays or writing
+files (GRIS text headers are read). Missing/too-distant observations are marked
+`unmatched`; processing errors are marked `failed`, with the reason in the
+manifest. Such runs return exit code 1 while keeping successful results. The
+manifest never links a failed registration as a usable output.
+
+To overlay existing GRIS data on a selected channel:
+
+```python
+root = Path('/mn/stornext/d9/data/harshm/GRISData/aligned_SDO')
+record = json.loads((root / 'alignment.json').read_text())['frames'][0]
+channel = record['channels']['AIA/171']
+assert channel['status'] in ('written', 'existing')
+sdo = sunpy.map.Map(root / channel['registered_sdo'])
+header = fits.Header.fromtextfile(root / record['gris_header'])
+# gris_data_2d is your existing quantity for this frame on the native GRIS grid.
+assert gris_data_2d.shape == tuple(record['gris_shape'])
+gris = sunpy.map.Map(gris_data_2d, header)
+fig = plt.figure()
+ax = fig.add_subplot(projection=sdo)
+sdo.plot(axes=ax)
+ax.contour(gris.data, levels=[0.8 * gris.data.max()],
+           transform=ax.get_transform(gris.wcs), colors='red')
+plt.show()
+```
+
+This overlays coordinates without evolving features between observation times.
+For analyses needing solar-rotation compensation, apply that explicitly during
+plotting or a separate analysis step, using the saved observation times.
