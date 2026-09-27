@@ -117,3 +117,47 @@ timestamp validation, UTC/manifest matching and tolerances, preservation of full
 WCS rectangle placement, flicker lifecycle, panel controls, grid changes, playback
 and stale-image clearing. Real-data validation still requires
 the external telescope, inversion and aligned SDO files.
+
+## Export a self-contained view for sharing
+
+Configure the grid and each panel, then click **Export View…** and save a `.py`
+file. For example, a 2 × 3 grid with 30 time steps exports those six panel
+selections across all 30 times. The export includes:
+
+- Only the selected wavelength/Stokes or atmosphere depth/quantity for each panel.
+- The selected HMI/AIA frames, GRIS rectangles, and selected GRIS flicker overlays.
+- Timestamps, per-frame WCS, units and matching details.
+- The applied layout, current time, colours, contrast mode/limits, current pan/zoom
+  bounds, playback speed/loop preference, and flicker selections.
+- The standalone viewer code and compressed numeric arrays in one Python file.
+
+All values retain their original array precision: compression is lossless and
+identical arrays (including repeated full-disk matches) are stored only once.
+The original spectral/inversion cubes, unselected wavelengths/depths/quantities,
+and unused SDO images are not included. Full-disk images remain full resolution,
+so exports containing many unique SDO frames can still be large. The dialog
+reports the final file size. Embedded text encoding also adds some overhead.
+
+Send **only that `.py` file**. It needs no repository, CSV, FITS, HDF5, WCS files,
+or sidecar archive. The recipient installs the standard dependencies once:
+
+```sh
+python -m pip install numpy astropy matplotlib PySide6-Essentials
+python shared_gris_view.py
+```
+
+Python 3.10 or newer is required. Libraries and the Python interpreter are not
+bundled in the export. The shared viewer offers time selection, playback,
+pan/zoom, image saving and GRIS flicker. It has no file-open, grid-editing or
+source/wavelength/depth selection controls: the exported data choices are fixed.
+The initial zoom is applied again when changing time, keeping the author's view.
+
+Data is decoded to a temporary archive and individual images are loaded as needed.
+There is no pickle payload. `python shared_gris_view.py --check` validates the
+embedded archive without opening the GUI. Missing/unavailable frames remain
+explicitly unavailable rather than displaying another frame's data.
+
+Export pauses the live playback/flicker controls and restores them afterward.
+Progress is shown, with cancellation between data chunks. A cancelled or failed
+export leaves any existing destination file unchanged. Successful export replaces
+it atomically. The original datasets are never modified.

@@ -291,6 +291,9 @@ class ComparisonWidget(QtWidgets.QWidget):
         apply = QtWidgets.QPushButton('Apply grid')
         apply.clicked.connect(self.rebuild_grid)
         grid_bar.addWidget(apply)
+        self.export_button = QtWidgets.QPushButton('Export View…')
+        self.export_button.clicked.connect(self.export_widget)
+        grid_bar.addWidget(self.export_button)
         self.time_mode = QtWidgets.QComboBox()
         self.time_mode.addItem('SDO: saved match / nearest UTC', 'utc')
         grid_bar.addWidget(self.time_mode)
@@ -341,6 +344,60 @@ class ComparisonWidget(QtWidgets.QWidget):
             warning.setWordWrap(True)
             outer.addWidget(warning)
         self.rebuild_grid()
+
+    def export_widget(self):
+        from inversion_viewer_export import ExportCancelled, export_view, snapshot_view
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, 'Export selected panels and all time frames', 'shared_gris_view.py', 'Python viewer (*.py)')
+        if not path:
+            return
+        destination = Path(path)
+        if destination.suffix.lower() != '.py':
+            destination = destination.with_name(destination.name + '.py')
+        was_playing = self.play.isChecked()
+        flickering = [panel.flicker.isChecked() for panel in self.panels]
+        progress = None
+        try:
+            # Snapshot before pausing so the exported flicker state is retained.
+            snapshot = snapshot_view(self)
+            self.play.setChecked(False)
+            for panel in self.panels:
+                panel.stop_flicker()
+            total = len(self.panels) * self.store.nt
+            progress = QtWidgets.QProgressDialog('Preparing export…', 'Cancel', 0, total, self)
+            progress.setWindowTitle('Export View')
+            progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+            progress.setMinimumDuration(0)
+            progress.setAutoClose(False)
+            progress.setAutoReset(False)
+            progress.show()
+            def update(done, total, message):
+                progress.setLabelText(message)
+                progress.setValue(done)
+                QtWidgets.QApplication.processEvents()
+                return not progress.wasCanceled()
+            result = export_view(self.store, snapshot, destination, update)
+            progress.close()
+            message = (f'Saved {result["panels"]} panels × {result["times"]} time frames '
+                       f'({result["bytes"] / 1024**2:.1f} MiB).\n\n'
+                       f'{destination}\n\nSend this one file. The recipient needs Python plus '
+                       'numpy, astropy, matplotlib and PySide6-Essentials.\n'
+                       'Full-disk SDO images remain full resolution; only selected slices are included.')
+            if result['unavailable']:
+                message += f'\n{result["unavailable"]} unavailable panel/time entries are preserved as blank panels with messages.'
+            QtWidgets.QMessageBox.information(self, 'View exported', message)
+        except ExportCancelled:
+            pass
+        except Exception as error:
+            QtWidgets.QMessageBox.critical(self, 'Export failed', str(error))
+        finally:
+            if progress is not None:
+                progress.close()
+            for panel, enabled in zip(self.panels, flickering):
+                if enabled:
+                    panel.flicker.setChecked(True)
+            if was_playing:
+                self.play.setChecked(True)
 
     def rebuild_grid(self):
         count = self.rows.value() * self.columns.value()
