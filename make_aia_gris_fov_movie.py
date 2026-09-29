@@ -6,10 +6,11 @@ AIA observation for each GRIS timestamp.  Columns are the available AIA
 channels.  The upper and lower rows show 4x and 2x the instantaneous GRIS
 field of view, respectively.
 
-Each AIA channel gets one normalization and one colorbar shared by both rows
-and every movie frame.  Limits are scanned from the complete selected time
-series before rendering.  By default they are the true finite minimum and
-maximum, so no finite image value is saturated/clipped by the color limits.
+Each AIA channel gets one normalization shared by both rows and every movie
+frame.  Limits are scanned from the complete selected time series before
+rendering, but colorbars are intentionally omitted.  By default the limits are
+the true finite minimum and maximum, so no finite image value is
+saturated/clipped by the color limits.
 
 Example
 -------
@@ -32,7 +33,7 @@ import numpy as np
 from astropy.io import fits
 from astropy.visualization import AsinhStretch, ImageNormalize
 from astropy.wcs import WCS
-from astropy.wcs.utils import pixel_to_pixel
+from astropy.wcs.utils import pixel_to_pixel, proj_plane_pixel_scales
 
 
 GOOD_STATUSES = {"written", "existing"}
@@ -52,6 +53,7 @@ class Crop:
     data: np.ndarray
     gris_x: np.ndarray
     gris_y: np.ndarray
+    extent_arcsec: tuple[float, float, float, float]
 
 
 def _display_channel(name: str) -> str:
@@ -149,7 +151,19 @@ def crop_around_gris(data: np.ndarray, aia_wcs: WCS, gris_wcs: WCS,
     y1 = min(ny, int(math.ceil(cy + half_height)) + 1)
     if x0 >= x1 or y0 >= y1:
         raise ValueError("Scaled GRIS field of view lies outside the AIA image")
-    return Crop(np.asarray(data[y0:y1, x0:x1], dtype=float), aia_x - x0, aia_y - y0)
+    # Express the displayed axes as offsets from the centre of the GRIS
+    # footprint.  Registered AIA data have nearly orthogonal image axes; the
+    # projected pixel scales retain the correct angular size even if the crop
+    # dimensions vary slightly between frames.
+    scales = np.asarray(proj_plane_pixel_scales(aia_wcs.celestial), dtype=float) * 3600.0
+    if scales.shape != (2,) or not np.all(np.isfinite(scales)) or np.any(scales <= 0):
+        raise ValueError("Cannot determine finite AIA pixel scales in arcseconds")
+    local_cx, local_cy = cx - x0, cy - y0
+    extent = ((-.5 - local_cx) * scales[0], (x1 - x0 - .5 - local_cx) * scales[0],
+              (-.5 - local_cy) * scales[1], (y1 - y0 - .5 - local_cy) * scales[1])
+    return Crop(np.asarray(data[y0:y1, x0:x1], dtype=float),
+                (aia_x - x0 - local_cx) * scales[0],
+                (aia_y - y0 - local_cy) * scales[1], extent)
 
 
 def scan_limits(channels: Sequence[str], frames: Sequence[MovieFrame], zoom: float
@@ -229,7 +243,8 @@ def render_movie(channels: Sequence[str], frames: Sequence[MovieFrame], output: 
             ax = axes[row, column]
             crop = initial[row, channel]
             image = ax.imshow(crop.data, origin="lower", cmap=cmaps[channel],
-                              norm=norms[channel], interpolation="nearest")
+                              norm=norms[channel], interpolation="nearest",
+                              extent=crop.extent_arcsec)
             # Draw the exact transformed GRIS WCS footprint, not merely a
             # centre marker or an axis-aligned approximation.  The black
             # stroke keeps the cyan contour visible on both dark and bright
@@ -240,17 +255,24 @@ def render_movie(channels: Sequence[str], frames: Sequence[MovieFrame], output: 
                 path_effects.Stroke(linewidth=3.5, foreground="black"),
                 path_effects.Normal(),
             ])
-            ax.set_xticks([])
-            ax.set_yticks([])
-            ax.set_ylabel(f"{zoom:g}× GRIS FOV" if column == 0 else "")
+            # One panel is sufficient to communicate the angular dimensions.
+            # Keep every other image clean and place exactly two ticks on each
+            # direction of the bottom-left panel.
+            if row == 1 and column == 0:
+                left, right, bottom, top = crop.extent_arcsec
+                ax.set_xticks(np.linspace(left, right, 4)[1:3])
+                ax.set_yticks(np.linspace(bottom, top, 4)[1:3])
+                ax.set_xlabel("ΔX [arcsec]")
+                ax.set_ylabel("ΔY [arcsec]")
+            else:
+                ax.set_xticks([])
+                ax.set_yticks([])
+                ax.set_ylabel(f"{zoom:g}× GRIS FOV" if column == 0 else "")
             if row == 0:
                 ax.set_title(f"AIA {_display_channel(channel)} Å")
                 ax.legend(loc="upper right", framealpha=.75, fontsize=8)
             artists[row, channel] = image
             boundaries[row, channel] = boundary
-        colorbar = fig.colorbar(artists[0, channel], ax=[axes[0, column], axes[1, column]],
-                                location="right", fraction=.045, pad=.02)
-        colorbar.set_label(units[channel])
     title = fig.suptitle("")
 
     def update(frame_number: int):
@@ -261,10 +283,14 @@ def render_movie(channels: Sequence[str], frames: Sequence[MovieFrame], output: 
                 crop = crops[row, channel]
                 image = artists[row, channel]
                 image.set_data(crop.data)
-                image.set_extent((-.5, crop.data.shape[1] - .5, -.5, crop.data.shape[0] - .5))
+                image.set_extent(crop.extent_arcsec)
                 ax = axes[row, channels.index(channel)]
-                ax.set_xlim(-.5, crop.data.shape[1] - .5)
-                ax.set_ylim(-.5, crop.data.shape[0] - .5)
+                left, right, bottom, top = crop.extent_arcsec
+                ax.set_xlim(left, right)
+                ax.set_ylim(bottom, top)
+                if row == 1 and channels.index(channel) == 0:
+                    ax.set_xticks(np.linspace(left, right, 4)[1:3])
+                    ax.set_yticks(np.linspace(bottom, top, 4)[1:3])
                 boundaries[row, channel].set_data(crop.gris_x, crop.gris_y)
         offsets = ", ".join(
             f"{_display_channel(channel)}: Δt={frame.time_offsets[channel]:+.2f}s"
