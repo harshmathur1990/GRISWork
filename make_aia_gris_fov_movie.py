@@ -3,7 +3,7 @@
 
 The root ``alignment.json`` is authoritative: it supplies exactly one nearest
 AIA observation for each GRIS timestamp.  Columns are the available AIA
-channels.  The upper and lower rows show 10x and 5x the instantaneous GRIS
+channels.  The upper and lower rows show 4x and 2x the instantaneous GRIS
 field of view, respectively.
 
 Each AIA channel gets one normalization and one colorbar shared by both rows
@@ -304,10 +304,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Require this many GRIS frames (default: 30; use 0 to accept any count)")
     parser.add_argument("--fps", type=float, default=4.0)
     parser.add_argument("--dpi", type=int, default=140)
-    parser.add_argument("--top-fov", type=float, default=10.0,
-                        help="Top-row GRIS FOV multiplier (default: 10)")
-    parser.add_argument("--bottom-fov", type=float, default=5.0,
-                        help="Bottom-row GRIS FOV multiplier (default: 5)")
+    parser.add_argument("--top-fov", type=float, default=4.0,
+                        help="Top-row GRIS FOV multiplier (default: 4)")
+    parser.add_argument("--bottom-fov", type=float, default=2.0,
+                        help="Bottom-row GRIS FOV multiplier (default: 2)")
     parser.add_argument("--asinh-a", type=float, default=0.01,
                         help="Asinh stretch transition parameter (default: 0.01; limits remain exact)")
     return parser
