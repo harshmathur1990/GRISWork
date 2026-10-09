@@ -6,7 +6,9 @@ shortest-cadence AIA channel is the master clock; every other AIA channel and
 HMI magnetogram is matched to its nearest exposure. The GRIS WCS headers define
 one fixed median field centre and the observing interval; the native GRIS
 outline is fixed at 12x6 arcsec unless overridden. Every AIA and HMI source map
-is passed through ``aiapy.calibrate.register`` before spatial sampling.
+is passed through ``aiapy.calibrate.register`` before spatial sampling. Unique
+FITS files are registered once in a process pool using every available CPU by
+default; both movie crops are cached from that single parallel pass.
 
 Each output is a fixed 3x2 layout: up to five AIA channels followed by HMI
 magnetogram as panel six. Every source is resampled onto one fixed absolute
@@ -31,9 +33,11 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import shutil
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -74,6 +78,22 @@ class SampledView:
     gris_x: np.ndarray
     gris_y: np.ndarray
     extent: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
+class SourceTask:
+    path: Path
+    center: tuple[float, float]
+    gris_fov: tuple[float, float]
+    zooms: tuple[float, ...]
+    pixel_scale: float
+
+
+@dataclass(frozen=True)
+class SourceProduct:
+    path: Path
+    samples: dict[float, np.ndarray]
+    cmap_name: str
 
 
 def display_channel(channel: str) -> str:
@@ -245,47 +265,87 @@ def sample_to_view(source, view: SampledView) -> np.ndarray:
                            order=1, mode="constant", cval=np.nan)
 
 
-def scan_limits(channels: Sequence[str], frames: Sequence[MovieFrame],
-                view: SampledView
-                ) -> tuple[dict[str, tuple[float, float]], dict[str, object]]:
-    """Compute fixed full-series limits once, including the HMI sixth panel."""
-    limits = {channel: [math.inf, -math.inf] for channel in channels}
-    hmi_absmax = 0.0
-    cmaps: dict[str, object] = {}
-    for number, frame in enumerate(frames, 1):
-        maps = {channel: load_registered_map(frame.aia[channel].path)
-                for channel in channels}
-        for channel in channels:
-            source = maps[channel]
-            values = sample_to_view(source, view)
-            finite = values[np.isfinite(values)]
-            if finite.size:
-                limits[channel][0] = min(limits[channel][0], float(np.min(finite)))
-                limits[channel][1] = max(limits[channel][1], float(np.max(finite)))
-            cmaps.setdefault(channel, source.plot_settings.get("cmap", "gray"))
-        magnetogram = load_registered_map(frame.magnetogram.path)
-        values = sample_to_view(magnetogram, view)
-        finite = values[np.isfinite(values)]
-        if finite.size:
-            hmi_absmax = max(hmi_absmax, float(np.max(np.abs(finite))))
-        print(f"Scanning fixed display limits: {number}/{len(frames)}", end="\r", flush=True)
-    print()
+def register_and_sample(task: SourceTask) -> SourceProduct:
+    """Worker process: register one unique full-disk file and sample all FOVs."""
+    source = load_registered_map(task.path)
+    samples = {
+        zoom: np.asarray(sample_to_view(
+            source, fixed_grid(task.center, task.gris_fov, zoom, task.pixel_scale)),
+            dtype=np.float32)
+        for zoom in task.zooms
+    }
+    cmap = source.plot_settings.get("cmap", "gray")
+    return SourceProduct(task.path, samples, getattr(cmap, "name", str(cmap)))
 
-    final: dict[str, tuple[float, float]] = {}
-    for channel, (low, high) in limits.items():
-        if not math.isfinite(low) or not math.isfinite(high):
+
+def available_cpus() -> int:
+    """Respect scheduler/OS affinity where available, otherwise use all CPUs."""
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:
+        return max(1, os.cpu_count() or 1)
+
+
+def preprocess_sources(frames: Sequence[MovieFrame], center: tuple[float, float],
+                       gris_fov: tuple[float, float], zooms: Sequence[float],
+                       pixel_scale: float, workers: int) -> dict[Path, SourceProduct]:
+    """Register every unique source once in parallel and retain only small crops."""
+    paths = {frame.magnetogram.path for frame in frames}
+    paths.update(source.path for frame in frames for source in frame.aia.values())
+    tasks = [SourceTask(path, center, gris_fov, tuple(zooms), pixel_scale)
+             for path in sorted(paths)]
+    worker_count = min(workers, len(tasks))
+    print(f"Parallel preprocessing: {len(tasks)} unique FITS files on {worker_count} workers")
+    products: dict[Path, SourceProduct] = {}
+    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+        futures = {executor.submit(register_and_sample, task): task.path for task in tasks}
+        for number, future in enumerate(as_completed(futures), 1):
+            path = futures[future]
+            try:
+                product = future.result()
+            except Exception as exc:
+                raise RuntimeError(f"Parallel registration failed for {path}: {exc}") from exc
+            products[product.path] = product
+            print(f"Registering and sampling: {number}/{len(tasks)}", end="\r", flush=True)
+    print()
+    return products
+
+
+def limits_from_products(channels: Sequence[str], frames: Sequence[MovieFrame],
+                         products: dict[Path, SourceProduct], largest_zoom: float
+                         ) -> tuple[dict[str, tuple[float, float]], dict[str, str]]:
+    """Compute fixed limits from already registered and sampled arrays."""
+    limits: dict[str, tuple[float, float]] = {}
+    cmaps: dict[str, str] = {}
+    for channel in channels:
+        paths = {frame.aia[channel].path for frame in frames}
+        arrays = [products[path].samples[largest_zoom] for path in paths]
+        finite_arrays = [values[np.isfinite(values)] for values in arrays]
+        finite_arrays = [values for values in finite_arrays if values.size]
+        if not finite_arrays:
             raise ValueError(f"No finite pixels found for {channel}")
+        low = min(float(np.min(values)) for values in finite_arrays)
+        high = max(float(np.max(values)) for values in finite_arrays)
         if low == high:
             pad = max(abs(low) * 1e-6, 1e-12)
             low, high = low - pad, high + pad
-        final[channel] = (low, high)
+        limits[channel] = (low, high)
+        cmaps[channel] = products[next(iter(paths))].cmap_name
         print(f"{channel}: fixed full-series limits [{low:.8g}, {high:.8g}]")
+
+    hmi_paths = {frame.magnetogram.path for frame in frames}
+    hmi_arrays = [products[path].samples[largest_zoom] for path in hmi_paths]
+    finite_hmi = [values[np.isfinite(values)] for values in hmi_arrays]
+    finite_hmi = [values for values in finite_hmi if values.size]
+    if not finite_hmi:
+        raise ValueError("No finite HMI magnetogram pixels found")
+    hmi_absmax = max(float(np.max(np.abs(values))) for values in finite_hmi)
     if not math.isfinite(hmi_absmax) or hmi_absmax <= 0:
         raise ValueError("No finite non-zero HMI magnetogram pixels found")
-    final[HMI_CHANNEL] = (-hmi_absmax, hmi_absmax)
+    limits[HMI_CHANNEL] = (-hmi_absmax, hmi_absmax)
     cmaps[HMI_CHANNEL] = "gray"
     print(f"{HMI_CHANNEL}: fixed symmetric limits [{-hmi_absmax:.8g}, {hmi_absmax:.8g}]")
-    return final, cmaps
+    return limits, cmaps
 
 
 def remove_contour(contour) -> None:
@@ -306,10 +366,11 @@ def output_path(prefix: Path, zoom: float, movie_format: str) -> Path:
 def render_movie(channels: Sequence[str], frames: Sequence[MovieFrame], output: Path,
                  zoom: float, center: tuple[float, float], gris_fov: tuple[float, float],
                  pixel_scale: float, limits: dict[str, tuple[float, float]],
-                 cmaps: dict[str, object], fps: float, dpi: int, asinh_a: float,
-                 pore_field: float) -> None:
+                 cmaps: dict[str, str], products: dict[Path, SourceProduct],
+                 fps: float, dpi: int, asinh_a: float, pore_field: float) -> None:
     import matplotlib.patheffects as path_effects
     import matplotlib.pyplot as plt
+    import sunpy.visualization.colormaps  # Register AIA colormap names with Matplotlib.
     from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter
     from matplotlib.colors import Normalize
     from matplotlib.lines import Line2D
@@ -339,10 +400,7 @@ def render_movie(channels: Sequence[str], frames: Sequence[MovieFrame], output: 
     def views_for(frame_number: int) -> dict[int, tuple[SampledView, np.ndarray]]:
         nonlocal cached_number, cached
         frame = frames[frame_number]
-        magnetogram = load_registered_map(frame.magnetogram.path)
-        aia_maps = {channel: load_registered_map(frame.aia[channel].path)
-                    for channel in channels}
-        magnetic_field = sample_to_view(magnetogram, common_view)
+        magnetic_field = products[frame.magnetogram.path].samples[zoom]
         result: dict[int, tuple[SampledView, np.ndarray]] = {}
         for panel_index, channel in enumerate(panels):
             if channel is None:
@@ -350,7 +408,7 @@ def render_movie(channels: Sequence[str], frames: Sequence[MovieFrame], output: 
             if channel == HMI_CHANNEL:
                 data = magnetic_field
             else:
-                data = sample_to_view(aia_maps[channel], common_view)
+                data = products[frame.aia[channel].path].samples[zoom]
             # All six panels now have identical absolute-coordinate sampling, shape, extent,
             # GRIS outline coordinates, and HMI contour pixels.
             result[panel_index] = replace(common_view, data=data), magnetic_field
@@ -424,7 +482,7 @@ def render_movie(channels: Sequence[str], frames: Sequence[MovieFrame], output: 
         if shutil.which("ffmpeg") is None:
             raise RuntimeError("ffmpeg is required for MP4 output; use --format gif otherwise")
         writer = FFMpegWriter(fps=fps, codec="libx264",
-                              extra_args=["-pix_fmt", "yuv420p", "-crf", "18"])
+                              extra_args=["-pix_fmt", "yuv420p", "-crf", "18", "-threads", "0"])
     animation.save(output, writer=writer, dpi=dpi)
     plt.close(fig)
     print(f"\nWrote {output}")
@@ -457,6 +515,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Absolute HMI levels for negative/positive pore contours (default: 500 G)")
     parser.add_argument("--fps", type=float, default=8.0)
     parser.add_argument("--dpi", type=int, default=140)
+    parser.add_argument("--workers", type=int, default=0,
+                        help="Parallel registration workers (default: 0 = all available CPUs)")
     parser.add_argument("--asinh-a", type=float, default=0.01,
                         help="AIA asinh stretch transition parameter (default: 0.01)")
     return parser
@@ -470,6 +530,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             raise ValueError(f"{option} must be finite and positive")
     if args.dpi <= 0 or not args.fov or any(not math.isfinite(v) or v <= 0 for v in args.fov):
         raise ValueError("--dpi and every --fov value must be positive")
+    if args.workers < 0:
+        raise ValueError("--workers must be non-negative (0 means all available CPUs)")
     if any(not math.isfinite(v) or v <= 0 for v in args.gris_fov):
         raise ValueError("Both --gris-fov dimensions must be finite and positive")
     if args.gris_center and any(not math.isfinite(v) for v in args.gris_center):
@@ -498,13 +560,16 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(f"Fixed GRIS centre: X={center[0]:.3f} arcsec, Y={center[1]:.3f} arcsec; "
           f"native FOV={native_fov[0]:g}×{native_fov[1]:g} arcsec")
     largest_zoom = max(args.fov)
-    limit_grid = fixed_grid(center, native_fov, largest_zoom, args.pixel_scale)
-    print("Registering every AIA and HMI source frame with aiapy.calibrate.register().")
-    limits, cmaps = scan_limits(channels, frames, limit_grid)
+    workers = args.workers or available_cpus()
+    print("Registering every unique AIA and HMI source frame once with "
+          "aiapy.calibrate.register().")
+    products = preprocess_sources(frames, center, native_fov, args.fov,
+                                  args.pixel_scale, workers)
+    limits, cmaps = limits_from_products(channels, frames, products, largest_zoom)
     for zoom in args.fov:
         render_movie(channels, frames, output_path(args.output_prefix, zoom, args.format),
                      zoom, center, native_fov, args.pixel_scale, limits, cmaps,
-                     args.fps, args.dpi, args.asinh_a, args.pore_field)
+                     products, args.fps, args.dpi, args.asinh_a, args.pore_field)
     return 0
 
 
