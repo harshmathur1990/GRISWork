@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Make separate 4x and 2x GRIS-FOV movies at the original AIA cadence.
 
-The original AIA FITS sequences under ``<raw-root>/AIA`` drive the movie. The
-shortest-cadence AIA channel is the master clock; every other AIA channel and
-HMI magnetogram is matched to its nearest exposure. One aligned GRIS WCS centre
+The original AIA FITS sequences under ``<raw-root>/AIA`` drive the movie. By
+default, every exposure from a shortest-cadence AIA channel is the movie clock
+(normally a 12-second EUV channel). Other panels use their nearest exposure, so
+24-second UV and 45-second HMI images repeat as needed. One aligned GRIS WCS centre
 (index 0 by default) anchors the entire movie and is differentially rotated to
 each AIA/HMI exposure time. The anchor never switches between fitted headers,
 so the tracked AIA scene does not jump because of frame-to-frame WCS-fit noise.
@@ -168,6 +169,7 @@ def discover_aia(raw_root: Path, requested: Sequence[str] | None,
 
 
 def nominal_cadence(files: Sequence[TimedFile]) -> float:
+    """Read the nominal cadence from filenames, falling back to timestamps."""
     matches = [CADENCE_RE.search(item.path.name) for item in files]
     values = [float(match.group("seconds")) for match in matches if match]
     if values:
@@ -178,25 +180,29 @@ def nominal_cadence(files: Sequence[TimedFile]) -> float:
     return math.inf
 
 
-def choose_cadence_channel(channels: Sequence[str], indexed: dict[str, list[TimedFile]],
-                           requested: str | None) -> str:
+def movie_timestamps(channels: Sequence[str], indexed: dict[str, list[TimedFile]],
+                     requested: str | None) -> tuple[str, list[datetime]]:
+    """Use every exposure from one shortest-cadence AIA channel as the clock."""
     if requested:
         selected = canonical_channel(requested)
         if selected not in indexed:
             raise ValueError(f"Cadence channel is not selected/available: {selected}")
-        return selected
-    return min(channels, key=lambda channel: (nominal_cadence(indexed[channel]),
-                                               -len(indexed[channel]), channel))
+    else:
+        selected = min(channels, key=lambda channel: (nominal_cadence(indexed[channel]),
+                                                       -len(indexed[channel]), channel))
+    cadence = nominal_cadence(indexed[selected])
+    label = f"{selected} ({cadence:g} s nominal)"
+    return label, [item.time for item in indexed[selected]]
 
 
-def build_movie_frames(master: str, channels: Sequence[str],
+def build_movie_frames(times: Sequence[datetime], channels: Sequence[str],
                        indexed: dict[str, list[TimedFile]],
                        magnetograms: Sequence[TimedFile]) -> list[MovieFrame]:
     frames = []
-    for index, clock in enumerate(indexed[master]):
-        frames.append(MovieFrame(index, clock.time,
-                                 {channel: nearest(clock.time, indexed[channel]) for channel in channels},
-                                 nearest(clock.time, magnetograms)))
+    for index, clock in enumerate(times):
+        frames.append(MovieFrame(index, clock,
+                                 {channel: nearest(clock, indexed[channel]) for channel in channels},
+                                 nearest(clock, magnetograms)))
     return frames
 
 
@@ -524,7 +530,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--channels", nargs="+", metavar="WAVELENGTH",
                         help="Up to five AIA channels; default: all original AIA channel folders")
     parser.add_argument("--cadence-channel", metavar="WAVELENGTH",
-                        help="AIA channel whose original timestamps drive the movie; default: shortest cadence")
+                        help="AIA channel used as movie clock; default: shortest nominal cadence")
     parser.add_argument("--fov", type=float, nargs="+", default=[4.0, 2.0],
                         help="Separate GRIS FOV multipliers (default: 4 2)")
     parser.add_argument("--gris-fov", type=float, nargs=2, default=[12.0, 6.0],
@@ -573,14 +579,27 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise FileNotFoundError("Original SDO root is unavailable; pass --raw-root explicitly")
     channels, indexed = discover_aia(raw_root, args.channels,
                                      gris_frames[0].time, gris_frames[-1].time)
-    master = choose_cadence_channel(channels, indexed, args.cadence_channel)
+    cadence_label, times = movie_timestamps(channels, indexed, args.cadence_channel)
     magnetograms = index_fits(raw_root / HMI_CHANNEL)
-    frames = build_movie_frames(master, channels, indexed, magnetograms)
+    frames = build_movie_frames(times, channels, indexed, magnetograms)
+    gris_start, gris_stop = gris_frames[0].time, gris_frames[-1].time
+    first_aia, last_aia = frames[0].time, frames[-1].time
+    print(f"GRIS observing interval: {gris_start.isoformat()} to {gris_stop.isoformat()}")
+    print(f"Movie AIA interval:      {first_aia.isoformat()} to {last_aia.isoformat()} "
+          f"(start +{(first_aia - gris_start).total_seconds():.3f} s, "
+          f"end {(last_aia - gris_stop).total_seconds():+.3f} s)")
     if len(channels) < 5:
         print(f"Warning: found {len(channels)} AIA channels; unused AIA slots will be blank.",
               file=sys.stderr)
-    print(f"Master AIA cadence: {master} ({len(frames)} original exposures); "
+    print(f"Movie cadence: {cadence_label} ({len(frames)} timestamps); "
           f"panels: {', '.join(channels)}, {HMI_CHANNEL}")
+    for channel in channels:
+        unique = len({frame.aia[channel].path for frame in frames})
+        print(f"  {channel}: {unique} unique exposure(s), "
+              f"{len(frames) - unique} repeated movie step(s)")
+    unique_hmi = len({frame.magnetogram.path for frame in frames})
+    print(f"  {HMI_CHANNEL}: {unique_hmi} unique exposure(s), "
+          f"{len(frames) - unique_hmi} repeated movie step(s)")
 
     native_fov = tuple(args.gris_fov)
     centers: dict[tuple[int, Path], tuple[float, float]] = {}
