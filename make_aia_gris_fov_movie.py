@@ -3,15 +3,20 @@
 
 The original AIA FITS sequences under ``<raw-root>/AIA`` drive the movie. The
 shortest-cadence AIA channel is the master clock; every other AIA channel and
-HMI magnetogram is matched to its nearest exposure. The GRIS WCS header nearest
-each AIA time supplies the field-of-view outline and crop centre.
+HMI magnetogram is matched to its nearest exposure. The GRIS WCS headers define
+one fixed median field centre and the observing interval; the native GRIS
+outline is fixed at 12x6 arcsec unless overridden. Every AIA and HMI source map
+is passed through ``aiapy.calibrate.register`` before spatial sampling.
 
 Each output is a fixed 3x2 layout: up to five AIA channels followed by HMI
-magnetogram as panel six. Exactly one panel has two fixed ticks per direction;
-the angular limits never change, so labels cannot make panels jump. Red and
-blue contours show positive and negative HMI field on every panel. No colorbars
-are drawn. AIA limits are fixed per channel over the full time series, using
-true finite extrema so brightenings remain comparable and are not clipped.
+magnetogram as panel six. Every source is resampled onto one fixed absolute
+helioprojective grid, including HMI. The native GRIS FOV defaults to 12x6
+arcsec: a 2x movie therefore uses centre X +/- 12 and centre Y +/- 6 arcsec.
+All populated panels have the same fixed integer tick values and angular
+limits, so labels cannot make panels jump. Red and blue
+contours show positive and negative HMI field on every panel. No colorbars are
+drawn. AIA limits are fixed per channel over the full time series, using true
+finite extrema so brightenings remain comparable and are not clipped.
 
 Example:
     python make_aia_gris_fov_movie.py \
@@ -29,7 +34,7 @@ import math
 import re
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -38,7 +43,6 @@ import numpy as np
 from astropy.io import fits
 from astropy.visualization import AsinhStretch, ImageNormalize
 from astropy.wcs import WCS
-from astropy.wcs.utils import pixel_to_pixel
 
 from align_sdo_from_hmi_continuum import TimedFile, index_fits
 
@@ -58,7 +62,6 @@ class GrisFrame:
 class MovieFrame:
     index: int
     time: datetime
-    gris: GrisFrame
     aia: dict[str, TimedFile]
     magnetogram: TimedFile
 
@@ -66,9 +69,8 @@ class MovieFrame:
 @dataclass(frozen=True)
 class SampledView:
     data: np.ndarray
-    source_x: np.ndarray
-    source_y: np.ndarray
-    source_wcs: WCS
+    world_x_deg: np.ndarray
+    world_y_deg: np.ndarray
     gris_x: np.ndarray
     gris_y: np.ndarray
     extent: tuple[float, float, float, float]
@@ -163,12 +165,11 @@ def choose_cadence_channel(channels: Sequence[str], indexed: dict[str, list[Time
 
 
 def build_movie_frames(master: str, channels: Sequence[str],
-                       indexed: dict[str, list[TimedFile]], magnetograms: Sequence[TimedFile],
-                       gris_frames: Sequence[GrisFrame]) -> list[MovieFrame]:
+                       indexed: dict[str, list[TimedFile]],
+                       magnetograms: Sequence[TimedFile]) -> list[MovieFrame]:
     frames = []
     for index, clock in enumerate(indexed[master]):
-        gris = min(gris_frames, key=lambda item: (abs(item.time - clock.time), item.time, item.index))
-        frames.append(MovieFrame(index, clock.time, gris,
+        frames.append(MovieFrame(index, clock.time,
                                  {channel: nearest(clock.time, indexed[channel]) for channel in channels},
                                  nearest(clock.time, magnetograms)))
     return frames
@@ -183,97 +184,87 @@ def read_gris_wcs(path: Path) -> tuple[WCS, tuple[int, int]]:
     return wcs, shape
 
 
-def gris_dimensions(gris_frames: Sequence[GrisFrame]) -> tuple[float, float]:
-    """Maximum axis-aligned GRIS footprint dimensions in arcseconds."""
-    widths, heights = [], []
+def gris_center(gris_frames: Sequence[GrisFrame]) -> tuple[float, float]:
+    """Return one fixed median GRIS centre in helioprojective arcseconds."""
+    centres = []
     for frame in gris_frames:
         wcs, (ny, nx) = read_gris_wcs(frame.header)
-        matrix = np.asarray(wcs.celestial.pixel_scale_matrix, dtype=float) * 3600.0
-        offsets = np.array([[-nx / 2, -ny / 2], [nx / 2, -ny / 2],
-                            [nx / 2, ny / 2], [-nx / 2, ny / 2]]) @ matrix.T
-        widths.append(float(np.ptp(offsets[:, 0])))
-        heights.append(float(np.ptp(offsets[:, 1])))
-    if not np.all(np.isfinite(widths + heights)) or min(widths + heights) <= 0:
-        raise ValueError("Cannot determine finite GRIS angular dimensions")
-    return max(widths), max(heights)
+        world_x, world_y = wcs.celestial.pixel_to_world_values(
+            (nx - 1) / 2, (ny - 1) / 2)
+        # Astropy may represent negative helioprojective longitude near 360°.
+        world_x = ((float(world_x) + 180.0) % 360.0) - 180.0
+        centres.append((world_x * 3600.0, float(world_y) * 3600.0))
+    values = np.asarray(centres, dtype=float)
+    if values.shape != (len(gris_frames), 2) or not np.all(np.isfinite(values)):
+        raise ValueError("Cannot determine a finite GRIS centre")
+    return float(np.median(values[:, 0])), float(np.median(values[:, 1]))
 
 
-def load_map(path: Path, register_aia: bool):
+def load_registered_map(path: Path):
+    """Load and register one full-disk AIA or HMI level-1 map."""
     import sunpy.map
+    from aiapy.calibrate import register
 
     result = sunpy.map.Map(str(path))
-    if register_aia:
-        from aiapy.calibrate import register
-        result = register(result)
+    result = register(result)
     if result.data.ndim != 2:
         raise ValueError(f"Expected a 2-D image: {path}")
     return result
 
 
-def sample_view(source, gris_wcs: WCS, gris_shape: tuple[int, int],
-                width_arcsec: float, height_arcsec: float) -> SampledView:
-    """Sample a fixed-size view centred on the current GRIS footprint."""
-    from astropy.wcs.utils import proj_plane_pixel_scales
+def fixed_grid(center: tuple[float, float], gris_fov: tuple[float, float],
+               zoom: float, pixel_scale: float) -> SampledView:
+    """Create the immutable absolute arcsecond grid used by every panel/frame."""
+    center_x, center_y = center
+    gris_width, gris_height = gris_fov
+    half_width = gris_width * zoom / 2
+    half_height = gris_height * zoom / 2
+    left, right = center_x - half_width, center_x + half_width
+    bottom, top = center_y - half_height, center_y + half_height
+    nx = max(2, int(math.ceil((right - left) / pixel_scale)))
+    ny = max(2, int(math.ceil((top - bottom) / pixel_scale)))
+    dx, dy = (right - left) / nx, (top - bottom) / ny
+    x_arcsec = left + (np.arange(nx) + .5) * dx
+    y_arcsec = bottom + (np.arange(ny) + .5) * dy
+    world_x, world_y = np.meshgrid(x_arcsec / 3600.0, y_arcsec / 3600.0)
+    gris_left, gris_right = center_x - gris_width / 2, center_x + gris_width / 2
+    gris_bottom, gris_top = center_y - gris_height / 2, center_y + gris_height / 2
+    gris_x = np.array([gris_left, gris_right, gris_right, gris_left, gris_left])
+    gris_y = np.array([gris_bottom, gris_bottom, gris_top, gris_top, gris_bottom])
+    return SampledView(np.empty((ny, nx)), world_x, world_y, gris_x, gris_y,
+                       (left, right, bottom, top))
+
+
+def sample_to_view(source, view: SampledView) -> np.ndarray:
+    """Sample a map onto the immutable absolute helioprojective grid."""
     from scipy.ndimage import map_coordinates
 
-    gris_ny, gris_nx = gris_shape
-    corner_x = np.array([-.5, gris_nx - .5, gris_nx - .5, -.5, -.5])
-    corner_y = np.array([-.5, -.5, gris_ny - .5, gris_ny - .5, -.5])
-    source_x, source_y = pixel_to_pixel(gris_wcs, source.wcs, corner_x, corner_y)
-    centre_x, centre_y = pixel_to_pixel(
-        gris_wcs, source.wcs, (gris_nx - 1) / 2, (gris_ny - 1) / 2)
-    if (not np.all(np.isfinite(source_x)) or not np.all(np.isfinite(source_y))
-            or not np.isfinite(centre_x) or not np.isfinite(centre_y)):
-        raise ValueError("GRIS footprint does not transform to finite source pixels")
-
-    scales = np.asarray(proj_plane_pixel_scales(source.wcs.celestial), dtype=float) * 3600.0
-    if scales.shape != (2,) or not np.all(np.isfinite(scales)) or np.any(scales <= 0):
-        raise ValueError("Cannot determine finite source pixel scales")
-    nx = max(2, int(math.ceil(width_arcsec / scales[0])))
-    ny = max(2, int(math.ceil(height_arcsec / scales[1])))
-    dx, dy = width_arcsec / nx, height_arcsec / ny
-    x_offsets = -width_arcsec / 2 + (np.arange(nx) + .5) * dx
-    y_offsets = -height_arcsec / 2 + (np.arange(ny) + .5) * dy
-    grid_x, grid_y = np.meshgrid(centre_x + x_offsets / scales[0],
-                                 centre_y + y_offsets / scales[1])
-    data = map_coordinates(np.asarray(source.data, dtype=float), [grid_y, grid_x],
-                           order=1, mode="constant", cval=np.nan)
-    extent = (-width_arcsec / 2, width_arcsec / 2,
-              -height_arcsec / 2, height_arcsec / 2)
-    return SampledView(data, grid_x, grid_y, source.wcs,
-                       (source_x - centre_x) * scales[0],
-                       (source_y - centre_y) * scales[1], extent)
-
-
-def sample_magnetogram(magnetogram, view: SampledView) -> np.ndarray:
-    """Sample HMI field onto a displayed panel's source-coordinate grid."""
-    from scipy.ndimage import map_coordinates
-
-    mx, my = pixel_to_pixel(view.source_wcs, magnetogram.wcs,
-                            view.source_x, view.source_y)
-    return map_coordinates(np.asarray(magnetogram.data, dtype=float), [my, mx],
+    source_x, source_y = source.wcs.celestial.world_to_pixel_values(
+        view.world_x_deg, view.world_y_deg)
+    return map_coordinates(np.asarray(source.data, dtype=float), [source_y, source_x],
                            order=1, mode="constant", cval=np.nan)
 
 
 def scan_limits(channels: Sequence[str], frames: Sequence[MovieFrame],
-                width: float, height: float, register_aia: bool
+                view: SampledView
                 ) -> tuple[dict[str, tuple[float, float]], dict[str, object]]:
     """Compute fixed full-series limits once, including the HMI sixth panel."""
     limits = {channel: [math.inf, -math.inf] for channel in channels}
     hmi_absmax = 0.0
     cmaps: dict[str, object] = {}
     for number, frame in enumerate(frames, 1):
-        gris_wcs, gris_shape = read_gris_wcs(frame.gris.header)
+        maps = {channel: load_registered_map(frame.aia[channel].path)
+                for channel in channels}
         for channel in channels:
-            source = load_map(frame.aia[channel].path, register_aia)
-            values = sample_view(source, gris_wcs, gris_shape, width, height).data
+            source = maps[channel]
+            values = sample_to_view(source, view)
             finite = values[np.isfinite(values)]
             if finite.size:
                 limits[channel][0] = min(limits[channel][0], float(np.min(finite)))
                 limits[channel][1] = max(limits[channel][1], float(np.max(finite)))
             cmaps.setdefault(channel, source.plot_settings.get("cmap", "gray"))
-        magnetogram = load_map(frame.magnetogram.path, False)
-        values = sample_view(magnetogram, gris_wcs, gris_shape, width, height).data
+        magnetogram = load_registered_map(frame.magnetogram.path)
+        values = sample_to_view(magnetogram, view)
         finite = values[np.isfinite(values)]
         if finite.size:
             hmi_absmax = max(hmi_absmax, float(np.max(np.abs(finite))))
@@ -313,18 +304,25 @@ def output_path(prefix: Path, zoom: float, movie_format: str) -> Path:
 
 
 def render_movie(channels: Sequence[str], frames: Sequence[MovieFrame], output: Path,
-                 zoom: float, gris_size: tuple[float, float], limits: dict[str, tuple[float, float]],
+                 zoom: float, center: tuple[float, float], gris_fov: tuple[float, float],
+                 pixel_scale: float, limits: dict[str, tuple[float, float]],
                  cmaps: dict[str, object], fps: float, dpi: int, asinh_a: float,
-                 pore_field: float, register_aia: bool) -> None:
+                 pore_field: float) -> None:
     import matplotlib.patheffects as path_effects
     import matplotlib.pyplot as plt
     from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter
     from matplotlib.colors import Normalize
     from matplotlib.lines import Line2D
+    from matplotlib.ticker import FormatStrFormatter
 
-    width, height = gris_size[0] * zoom, gris_size[1] * zoom
+    common_view = fixed_grid(center, gris_fov, zoom, pixel_scale)
+    left, right, bottom, top = common_view.extent
+    width, height = right - left, top - bottom
     panels = list(channels) + [None] * (5 - len(channels)) + [HMI_CHANNEL]
-    tick_panel = next((index for index in range(3, 6) if panels[index] is not None), 0)
+    x_ticks = [int(math.ceil(left + width / 4)), int(math.floor(right - width / 4))]
+    y_ticks = [int(math.ceil(bottom + height / 4)), int(math.floor(top - height / 4))]
+    if x_ticks[0] >= x_ticks[1] or y_ticks[0] >= y_ticks[1]:
+        raise ValueError("FOV is too small to place two distinct integer ticks")
     norms = {channel: ImageNormalize(vmin=limits[channel][0], vmax=limits[channel][1],
                                      stretch=AsinhStretch(asinh_a), clip=True)
              for channel in channels}
@@ -341,17 +339,21 @@ def render_movie(channels: Sequence[str], frames: Sequence[MovieFrame], output: 
     def views_for(frame_number: int) -> dict[int, tuple[SampledView, np.ndarray]]:
         nonlocal cached_number, cached
         frame = frames[frame_number]
-        gris_wcs, gris_shape = read_gris_wcs(frame.gris.header)
-        magnetogram = load_map(frame.magnetogram.path, False)
+        magnetogram = load_registered_map(frame.magnetogram.path)
+        aia_maps = {channel: load_registered_map(frame.aia[channel].path)
+                    for channel in channels}
+        magnetic_field = sample_to_view(magnetogram, common_view)
         result: dict[int, tuple[SampledView, np.ndarray]] = {}
         for panel_index, channel in enumerate(panels):
             if channel is None:
                 continue
-            source = magnetogram if channel == HMI_CHANNEL else load_map(
-                frame.aia[channel].path, register_aia)
-            view = sample_view(source, gris_wcs, gris_shape, width, height)
-            field = view.data if channel == HMI_CHANNEL else sample_magnetogram(magnetogram, view)
-            result[panel_index] = view, field
+            if channel == HMI_CHANNEL:
+                data = magnetic_field
+            else:
+                data = sample_to_view(aia_maps[channel], common_view)
+            # All six panels now have identical absolute-coordinate sampling, shape, extent,
+            # GRIS outline coordinates, and HMI contour pixels.
+            result[panel_index] = replace(common_view, data=data), magnetic_field
         cached_number, cached = frame_number, result
         return result
 
@@ -373,14 +375,14 @@ def render_movie(channels: Sequence[str], frames: Sequence[MovieFrame], output: 
         ax.set_ylim(view.extent[2], view.extent[3])
         ax.set_title("HMI magnetogram" if channel == HMI_CHANNEL
                      else f"AIA {display_channel(channel)} Å")
-        if panel_index == tick_panel:
-            ax.set_xticks([-width / 4, width / 4])
-            ax.set_yticks([-height / 4, height / 4])
-            ax.set_xlabel("ΔX [arcsec]")
-            ax.set_ylabel("ΔY [arcsec]")
-        else:
-            ax.set_xticks([])
-            ax.set_yticks([])
+        ax.set_xticks(x_ticks)
+        ax.set_yticks(y_ticks)
+        ax.xaxis.set_major_formatter(FormatStrFormatter("%d"))
+        ax.yaxis.set_major_formatter(FormatStrFormatter("%d"))
+        if panel_index >= 3:
+            ax.set_xlabel("Solar X [arcsec]")
+        if panel_index % 3 == 0:
+            ax.set_ylabel("Solar Y [arcsec]")
         images[panel_index] = image
         boundaries[panel_index] = boundary
         magnetic_contours[panel_index] = contour
@@ -444,25 +446,34 @@ def build_parser() -> argparse.ArgumentParser:
                         help="AIA channel whose original timestamps drive the movie; default: shortest cadence")
     parser.add_argument("--fov", type=float, nargs="+", default=[4.0, 2.0],
                         help="Separate GRIS FOV multipliers (default: 4 2)")
+    parser.add_argument("--gris-fov", type=float, nargs=2, default=[12.0, 6.0],
+                        metavar=("WIDTH", "HEIGHT"),
+                        help="Native GRIS FOV in arcsec (default: 12 6)")
+    parser.add_argument("--gris-center", type=float, nargs=2, metavar=("X", "Y"),
+                        help="Fixed helioprojective centre in arcsec; default: median WCS centre")
+    parser.add_argument("--pixel-scale", type=float, default=0.6, metavar="ARCSEC",
+                        help="Fixed movie-grid sampling (default: 0.6 arcsec/pixel)")
     parser.add_argument("--pore-field", type=float, default=500.0, metavar="GAUSS",
                         help="Absolute HMI levels for negative/positive pore contours (default: 500 G)")
     parser.add_argument("--fps", type=float, default=8.0)
     parser.add_argument("--dpi", type=int, default=140)
     parser.add_argument("--asinh-a", type=float, default=0.01,
                         help="AIA asinh stretch transition parameter (default: 0.01)")
-    parser.add_argument("--no-register-aia", action="store_true",
-                        help="Do not apply aiapy in-memory registration to original level-1 AIA files")
     return parser
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     for option, value in (("--fps", args.fps), ("--pore-field", args.pore_field),
-                          ("--asinh-a", args.asinh_a)):
+                          ("--asinh-a", args.asinh_a), ("--pixel-scale", args.pixel_scale)):
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{option} must be finite and positive")
     if args.dpi <= 0 or not args.fov or any(not math.isfinite(v) or v <= 0 for v in args.fov):
         raise ValueError("--dpi and every --fov value must be positive")
+    if any(not math.isfinite(v) or v <= 0 for v in args.gris_fov):
+        raise ValueError("Both --gris-fov dimensions must be finite and positive")
+    if args.gris_center and any(not math.isfinite(v) for v in args.gris_center):
+        raise ValueError("Both --gris-center coordinates must be finite")
 
     manifest, gris_frames = load_manifest(args.aligned_root)
     saved_raw_root = manifest.get("raw_root")
@@ -475,21 +486,25 @@ def main(argv: Iterable[str] | None = None) -> int:
                                      gris_frames[0].time, gris_frames[-1].time)
     master = choose_cadence_channel(channels, indexed, args.cadence_channel)
     magnetograms = index_fits(raw_root / HMI_CHANNEL)
-    frames = build_movie_frames(master, channels, indexed, magnetograms, gris_frames)
+    frames = build_movie_frames(master, channels, indexed, magnetograms)
     if len(channels) < 5:
         print(f"Warning: found {len(channels)} AIA channels; unused AIA slots will be blank.",
               file=sys.stderr)
     print(f"Master AIA cadence: {master} ({len(frames)} original exposures); "
           f"panels: {', '.join(channels)}, {HMI_CHANNEL}")
 
-    gris_size = gris_dimensions(gris_frames)
+    center = tuple(args.gris_center) if args.gris_center else gris_center(gris_frames)
+    native_fov = tuple(args.gris_fov)
+    print(f"Fixed GRIS centre: X={center[0]:.3f} arcsec, Y={center[1]:.3f} arcsec; "
+          f"native FOV={native_fov[0]:g}×{native_fov[1]:g} arcsec")
     largest_zoom = max(args.fov)
-    limits, cmaps = scan_limits(channels, frames, gris_size[0] * largest_zoom,
-                                gris_size[1] * largest_zoom, not args.no_register_aia)
+    limit_grid = fixed_grid(center, native_fov, largest_zoom, args.pixel_scale)
+    print("Registering every AIA and HMI source frame with aiapy.calibrate.register().")
+    limits, cmaps = scan_limits(channels, frames, limit_grid)
     for zoom in args.fov:
         render_movie(channels, frames, output_path(args.output_prefix, zoom, args.format),
-                     zoom, gris_size, limits, cmaps, args.fps, args.dpi, args.asinh_a,
-                     args.pore_field, not args.no_register_aia)
+                     zoom, center, native_fov, args.pixel_scale, limits, cmaps,
+                     args.fps, args.dpi, args.asinh_a, args.pore_field)
     return 0
 
 
