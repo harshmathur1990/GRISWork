@@ -3,7 +3,8 @@
 
 The original AIA FITS sequences under ``<raw-root>/AIA`` drive the movie. By
 default, every exposure from a shortest-cadence AIA channel is the movie clock
-(normally a 12-second EUV channel). Other panels use their nearest exposure, so
+(normally a 12-second EUV channel). Only exposures inside the exact GRIS time
+interval are selected. Other panels use their nearest exposure, so
 24-second UV and 45-second HMI images repeat as needed. One aligned GRIS WCS centre
 (index 0 by default) anchors the entire movie and is differentially rotated to
 each AIA/HMI exposure time. The anchor never switches between fitted headers,
@@ -182,7 +183,7 @@ def nominal_cadence(files: Sequence[TimedFile]) -> float:
 
 def movie_timestamps(channels: Sequence[str], indexed: dict[str, list[TimedFile]],
                      requested: str | None) -> tuple[str, list[datetime]]:
-    """Use every exposure from one shortest-cadence AIA channel as the clock."""
+    """Use every in-interval exposure from one shortest-cadence AIA channel."""
     if requested:
         selected = canonical_channel(requested)
         if selected not in indexed:
@@ -510,7 +511,7 @@ def render_movie(channels: Sequence[str], frames: Sequence[MovieFrame], output: 
                 field, levels=[-pore_field, pore_field], colors=["dodgerblue", "red"],
                 linewidths=1.25, origin="lower", extent=view.extent, zorder=5)
             returned.extend([images[panel_index], boundaries[panel_index]])
-        title.set_text(frame.time.isoformat())
+        title.set_text(f"AIA observing time: {frame.time.isoformat()}")
         print(f"Rendering {output.name}: {frame_number + 1}/{len(frames)}",
               end="\r", flush=True)
         return returned
@@ -591,14 +592,16 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise FileNotFoundError("Original SDO root is unavailable; pass --raw-root explicitly")
     channels, indexed = discover_aia(raw_root, args.channels,
                                      gris_frames[0].time, gris_frames[-1].time)
+    gris_start, gris_stop = gris_frames[0].time, gris_frames[-1].time
     cadence_label, times = movie_timestamps(channels, indexed, args.cadence_channel)
     magnetograms = index_fits(raw_root / HMI_CHANNEL)
     frames = build_movie_frames(times, channels, indexed, magnetograms)
-    gris_start, gris_stop = gris_frames[0].time, gris_frames[-1].time
     first_aia, last_aia = frames[0].time, frames[-1].time
     print(f"GRIS observing interval: {gris_start.isoformat()} to {gris_stop.isoformat()}")
-    print(f"Movie AIA interval:      {first_aia.isoformat()} to {last_aia.isoformat()} "
-          f"(start +{(first_aia - gris_start).total_seconds():.3f} s, "
+    print("AIA selection window:    exact GRIS observing interval")
+    print(f"Available movie frames:  {first_aia.isoformat()} to {last_aia.isoformat()} "
+          f"(first/last {cadence_label.split(' (', 1)[0]} exposures inside that window; "
+          f"start +{(first_aia - gris_start).total_seconds():.3f} s, "
           f"end {(last_aia - gris_stop).total_seconds():+.3f} s)")
     if len(channels) < 5:
         print(f"Warning: found {len(channels)} AIA channels; unused AIA slots will be blank.",
@@ -606,9 +609,13 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(f"Movie cadence: {cadence_label} ({len(frames)} timestamps); "
           f"panels: {', '.join(channels)}, {HMI_CHANNEL}")
     for channel in channels:
+        available = len(indexed[channel])
         unique = len({frame.aia[channel].path for frame in frames})
-        print(f"  {channel}: {unique} unique exposure(s), "
-              f"{len(frames) - unique} repeated movie step(s)")
+        repeated = len(frames) - unique
+        unused = available - unique
+        suffix = " (nearest frame held where no new exposure is available)" if repeated else ""
+        print(f"  {channel}: {available} exposure(s) available inside GRIS interval; "
+              f"{unique} used, {unused} unused, {repeated} repeated movie step(s){suffix}")
     unique_hmi = len({frame.magnetogram.path for frame in frames})
     print(f"  {HMI_CHANNEL}: {unique_hmi} unique exposure(s), "
           f"{len(frames) - unique_hmi} repeated movie step(s)")
