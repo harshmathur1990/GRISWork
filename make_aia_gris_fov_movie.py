@@ -15,7 +15,7 @@ AIA coordinates. Every AIA and HMI source map is passed through
 FITS files are registered once in a process pool using every available CPU by
 default; both movie crops are cached from that single parallel pass.
 
-Each output is a fixed 3x2 layout: up to five AIA channels followed by HMI
+Each output is a fixed 2-row x 3-column layout: up to five AIA channels followed by HMI
 magnetogram as panel six. Every source is resampled onto the same per-frame
 helioprojective grid, including HMI. The native GRIS FOV defaults to 12x6
 arcsec: a 2x movie therefore samples centre X +/- 12 and centre Y +/- 6 arcsec,
@@ -157,7 +157,7 @@ def discover_aia(raw_root: Path, requested: Sequence[str] | None,
     if not channels:
         raise ValueError(f"No original AIA channel directories found below {aia_root}")
     if len(channels) > 5:
-        raise ValueError("A 3x2 layout allows five AIA channels; select five with --channels")
+        raise ValueError("A 2-row x 3-column layout allows five AIA channels; select five with --channels")
 
     indexed: dict[str, list[TimedFile]] = {}
     for channel in channels:
@@ -418,7 +418,13 @@ def render_movie(channels: Sequence[str], frames: Sequence[MovieFrame], output: 
              for channel in channels}
     norms[HMI_CHANNEL] = Normalize(*limits[HMI_CHANNEL], clip=True)
 
-    fig, axes_array = plt.subplots(2, 3, figsize=(12.0, 7.8), constrained_layout=True)
+    # Match the 2:1 data aspect in a contiguous 2-row x 3-column grid. The margins are
+    # chosen so each axes is approximately 2:1 after reserving only a narrow
+    # strip for the timestamp and outer tick labels.
+    fig, axes_array = plt.subplots(2, 3, figsize=(15.0, 5.62),
+                                   sharex=True, sharey=True)
+    fig.subplots_adjust(left=.04, right=.995, bottom=.08, top=.93,
+                        wspace=0, hspace=0)
     axes = list(axes_array.flat)
     images: dict[int, object] = {}
     boundaries: dict[int, object] = {}
@@ -460,12 +466,19 @@ def render_movie(channels: Sequence[str], frames: Sequence[MovieFrame], output: 
                              origin="lower", extent=view.extent, zorder=5)
         ax.set_xlim(view.extent[0], view.extent[1])
         ax.set_ylim(view.extent[2], view.extent[3])
-        ax.set_title("HMI magnetogram" if channel == HMI_CHANNEL
-                     else f"AIA {display_channel(channel)} Å")
+        channel_label = ("HMI magnetogram" if channel == HMI_CHANNEL
+                         else f"AIA {display_channel(channel)} Å")
+        ax.text(.02, .96, channel_label, transform=ax.transAxes,
+                ha="left", va="top", color="black", fontsize=11,
+                fontweight="bold", zorder=10,
+                bbox=dict(facecolor="white", edgecolor="none", alpha=.65, pad=1.5))
         ax.set_xticks(x_ticks)
         ax.set_yticks(y_ticks)
         ax.xaxis.set_major_formatter(FormatStrFormatter("%d"))
         ax.yaxis.set_major_formatter(FormatStrFormatter("%d"))
+        ax.tick_params(axis="both", which="both", direction="in", top=True, right=True,
+                       labelbottom=panel_index >= 3, labelleft=panel_index % 3 == 0,
+                       pad=2)
         if panel_index >= 3:
             ax.set_xlabel("X [arcsec]")
         if panel_index % 3 == 0:
@@ -497,8 +510,7 @@ def render_movie(channels: Sequence[str], frames: Sequence[MovieFrame], output: 
                 field, levels=[-pore_field, pore_field], colors=["dodgerblue", "red"],
                 linewidths=1.25, origin="lower", extent=view.extent, zorder=5)
             returned.extend([images[panel_index], boundaries[panel_index]])
-        title.set_text(f"AIA cadence  {frame.index + 1:03d}/{len(frames):03d}  "
-                       f"{frame.time.isoformat()}  |  {zoom:g}× GRIS FOV")
+        title.set_text(frame.time.isoformat())
         print(f"Rendering {output.name}: {frame_number + 1}/{len(frames)}",
               end="\r", flush=True)
         return returned
